@@ -66,3 +66,14 @@ atuais e escolhendo adapters compatíveis.
 -   Agente local não escolhe comandos por conta própria.
 -   Toda execução pertence a projeto/task/correlation ID.
 -   Uma task só chega ao Executor em estado `READY_FOR_CODEX`.
+
+## Local Agent implementado (P2.9–P2.10)
+
+`LocalAgentTransport` representa a fronteira de protocolo in-process, sem
+IPC, JSON ou rede. Aceita somente `BOT_COMMAND` com `BotCommand` concreto,
+valida Envelope/Action e exige igualdade de ProjectID e TaskID (inclusive
+presença). Chama exclusivamente `ports.LocalAgent.Execute`.
+
+O dispatcher mantém Policy, Allowlist e consulta ao ProjectRepository antes
+das cinco capabilities existentes. Sandbox e limites permanecem nos
+executores. O transport não concede permissões nem cria approvals.
