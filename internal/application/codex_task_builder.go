@@ -1,68 +1,15 @@
 package application
 
 import (
-	"errors"
-	"strings"
 	"time"
-	"unicode"
 
 	"dev-orchestrator/internal/domain"
 	"dev-orchestrator/internal/ports"
 )
 
-var ErrInvalidExecutorTaskSpec = errors.New("invalid executor task spec")
-
-// ExecutorTaskSpec describes authorized work. All text is declarative, never
-// interpreted as commands. Scope contains canonical relative paths, not globs.
-type ExecutorTaskSpec struct {
-	Objective          string
-	Scope              []string
-	Constraints        []string
-	AcceptanceCriteria []string
-}
-
-func (s ExecutorTaskSpec) Validate() error {
-	if strings.TrimSpace(s.Objective) == "" || len(s.Scope) == 0 || len(s.AcceptanceCriteria) == 0 {
-		return ErrInvalidExecutorTaskSpec
-	}
-	for _, p := range s.Scope {
-		if !safeExecutorScopePath(p) {
-			return ErrInvalidExecutorTaskSpec
-		}
-	}
-	for _, items := range [][]string{s.Constraints, s.AcceptanceCriteria} {
-		for _, item := range items {
-			if strings.TrimSpace(item) == "" {
-				return ErrInvalidExecutorTaskSpec
-			}
-		}
-	}
-	return nil
-}
-
-// Use a platform-independent slash-only grammar. Reject rather than clean paths
-// so traversal, Windows roots/streams and patterns cannot broaden authority.
-// This lexical contract neither accesses files nor resolves symlinks.
-func safeExecutorScopePath(p string) bool {
-	if p == "" || strings.HasPrefix(p, "/") || strings.ContainsAny(p, "\\:*?\"<>|") {
-		return false
-	}
-	for _, r := range p {
-		if unicode.IsControl(r) {
-			return false
-		}
-	}
-	for _, part := range strings.Split(p, "/") {
-		if part == "" || part == "." || part == ".." || strings.TrimSpace(part) != part || strings.HasSuffix(part, ".") {
-			return false
-		}
-	}
-	return true
-}
-
 // CodexTask is the concrete CODEX_TASK payload. Envelope owns its identities.
 type CodexTask struct {
-	Spec ExecutorTaskSpec
+	Spec ports.ExecutorTaskSpec
 }
 
 func (t CodexTask) Validate() error { return t.Spec.Validate() }
@@ -78,7 +25,7 @@ type CodexTaskMetadata struct {
 
 type CodexTaskRequest struct {
 	Decision ports.PlannerDecision
-	Spec     ExecutorTaskSpec
+	Spec     ports.ExecutorTaskSpec
 	Metadata CodexTaskMetadata
 }
 

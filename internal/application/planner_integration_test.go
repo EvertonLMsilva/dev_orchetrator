@@ -71,7 +71,7 @@ func TestPlannerIntegrationExecutor(t *testing.T) {
 	if err != nil || rebuilt.CurrentTask != refined {
 		t.Fatal("ready task not persisted")
 	}
-	envelope, err := (application.CodexTaskBuilder{}).Build(application.CodexTaskRequest{Decision: decision, Spec: application.ExecutorTaskSpec{Objective: "Implement contract validation", Scope: []string{"internal/contract.go"}, Constraints: []string{"Preserve existing contracts"}, AcceptanceCriteria: []string{"Invalid inputs are rejected"}}, Metadata: application.CodexTaskMetadata{ProtocolVersion: "v1", MessageID: "codex-task", CorrelationID: "executor", CreatedAt: time.Now()}})
+	envelope, err := (application.CodexTaskBuilder{}).Build(application.CodexTaskRequest{Decision: decision, Spec: ports.ExecutorTaskSpec{Objective: "Implement contract validation", Scope: []string{"internal/contract.go"}, Constraints: []string{"Preserve existing contracts"}, AcceptanceCriteria: []string{"Invalid inputs are rejected"}}, Metadata: application.CodexTaskMetadata{ProtocolVersion: "v1", MessageID: "codex-task", CorrelationID: "executor", CreatedAt: time.Now()}})
 	if err != nil || envelope.Validate() != nil || envelope.MessageType != domain.MessageTypeCodexTask || envelope.ProjectID != refined.ProjectID || envelope.TaskID == nil || *envelope.TaskID != refined.ID {
 		t.Fatalf("CODEX_TASK: %+v %v", envelope, err)
 	}
