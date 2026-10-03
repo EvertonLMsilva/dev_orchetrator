@@ -19,17 +19,22 @@ payload
 
 Planner solicita uma ação local permitida.
 
-Payload conceitual:
+Payload implementado in-process: `application.BotCommand{Action: domain.Action}`.
 
-``` json
-{"commandId":"...","action":"search","args":{},"reason":"..."}
-```
+A Action usa a união fechada de parâmetros existente, sem comandos, shell ou argv.
+Envelope e Action são validados antes da execução; ProjectID e TaskID devem coincidir.
+Payloads de outros tipos são rejeitados. Não há serialização JSON nesta fronteira.
 
 ### BOT_RESULT
 
-``` json
-{"commandId":"...","status":"SUCCESS|FAILED|DENIED","exitCode":0,"output":"...","truncated":false}
-```
+Payload concreto `application.BotResult`: ActionType, Status, Result tipado opcional
+e Error com código fixo opcional. Status: SUCCESS, BLOCKED, APPROVAL_REQUIRED ou FAILED.
+Somente SUCCESS contém ActionResult validado e correspondente à ação. Erros não
+incluem texto bruto de dependências ou resultados parciais. Cancellation/deadline
+geram FAILED com CANCELED/DEADLINE_EXCEEDED; o contexto original chega ao LocalAgent.
+CorrelationID, ProjectID e TaskID são preservados; MessageID recebe sufixo :result.
+Entrada inválida retorna erro fixo antes do dispatcher, sem BOT_RESULT.
+APPROVAL_REQUIRED informa a decisão sem executar ou iniciar workflow.
 
 ### PLANNER_DECISION
 
