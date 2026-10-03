@@ -7,6 +7,8 @@
 /coverage/
 
 # Local Go workspace
+.tmp-go/
+domain.test.exe
 go.work
 go.work.sum
 

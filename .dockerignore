@@ -1,0 +1,11 @@
+.git
+.tmp-go
+domain.test.exe
+bin
+coverage
+*.exe
+*.test
+*.out
+.env
+.env.*
+!.env.example

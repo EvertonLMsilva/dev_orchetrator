@@ -51,6 +51,30 @@ Até lá o sistema deve conseguir:
 
 P6--P9 evoluem Git/PR, segurança, multiprojeto e autonomia controlada.
 
+## Development / Validation
+
+Windows continua sendo o ambiente de desenvolvimento normal. Linux via
+Docker é o ambiente oficial de validação Go, usando `golang:1.25`, alinhado
+ao `go.mod`. O Smart App Control pode bloquear executáveis temporários de
+teste Go gerados localmente no Windows.
+
+Validação completa rápida, sem rebuild, no PowerShell (uma linha):
+
+```powershell
+docker run --rm -v "${PWD}:/app" -w /app golang:1.25 ./scripts/validate.sh
+```
+
+Para validar usando a imagem construída:
+
+```powershell
+docker build -t dev-orchestrator-validation .
+docker run --rm dev-orchestrator-validation ./scripts/validate.sh
+```
+
+O script executa `go test ./...`, `go vet ./...` e `go build ./...`, nessa
+ordem, e para imediatamente se algum comando falhar. A imagem serve apenas
+para desenvolvimento/validação; o runtime do Local Agent será decidido no P2.
+
 ## Primeiro passo
 
 Não implemente integrações ainda. Comece em `P0.1`, refinando uma task

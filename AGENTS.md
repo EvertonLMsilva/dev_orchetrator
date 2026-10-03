@@ -27,6 +27,18 @@ Não leia roadmap, histórico ou outros módulos por padrão.
 -   preserve alterações locais;
 -   dúvida arquitetural bloqueante → `BLOCKED`, não investigação ampla.
 
+## Validação Go
+
+-   Ambiente oficial de validação: Linux via Docker.
+-   Não considerar bloqueio do Windows Smart App Control como falha do
+    código sem evidência adicional.
+-   Para tasks Go, executar ao final `./scripts/validate.sh` dentro do
+    container Linux; o aceite final deve usar esse ambiente.
+-   Não desabilitar Smart App Control nem criar exceções de segurança
+    para executar testes.
+-   Testes focados durante TDD podem rodar normalmente no ambiente
+    disponível.
+
 ## Segurança
 
 -   nenhum comando destrutivo automático;
