@@ -1,0 +1,22 @@
+# Go build and test artifacts
+/bin/
+*.exe
+*.exe~
+*.test
+*.out
+/coverage/
+
+# Local Go workspace
+go.work
+go.work.sum
+
+# Local environment and editors
+.env
+.env.*
+!.env.example
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
