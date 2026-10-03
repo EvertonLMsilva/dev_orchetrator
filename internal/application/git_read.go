@@ -1,17 +1,13 @@
 package application
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
-	"time"
 )
-
-const MaxGitOutputBytes = 1024 * 1024
 
 var (
 	ErrGitRepository  = errors.New("invalid workspace Git repository")
@@ -59,23 +55,11 @@ func gitWorkspace(workspace string) (string, error) {
 	return root, nil
 }
 
-type gitOutput struct {
-	buffer   bytes.Buffer
-	exceeded bool
-}
-
-func (b *gitOutput) Write(p []byte) (int, error) {
-	if len(p) > MaxGitOutputBytes-b.buffer.Len() {
-		b.exceeded = true
-		return 0, ErrGitOutputLimit
-	}
-	return b.buffer.Write(p)
-}
-
 // This helper is private to the two fixed Git read operations; it is not a
 // process executor API. Callers never supply flags or command strings.
 func gitRead(ctx context.Context, root string, status bool, path string) ([]byte, error) {
-	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	limits := gitProcessLimits()
+	ctx, cancel := processContext(ctx, limits)
 	defer cancel()
 	if err := ctx.Err(); err != nil {
 		return nil, err
@@ -98,14 +82,11 @@ func gitRead(ctx context.Context, root string, status bool, path string) ([]byte
 		}
 	}
 	cmd.Env = append(cmd.Env, "GIT_DIR="+filepath.Join(root, ".git"), "GIT_WORK_TREE="+root, "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL="+os.DevNull, "GIT_TERMINAL_PROMPT=0")
-	var stdout, stderr gitOutput
-	cmd.Stdout, cmd.Stderr = &stdout, &stderr
-	cmd.WaitDelay = time.Second
-	err := cmd.Run()
+	stdout, _, err := runLimitedProcess(ctx, cmd, limits)
 	if ctx.Err() != nil {
 		return nil, ctx.Err()
 	}
-	if stdout.exceeded || stderr.exceeded {
+	if errors.Is(err, ErrProcessOutputLimit) {
 		return nil, ErrGitOutputLimit
 	}
 	if err != nil {
@@ -114,5 +95,5 @@ func gitRead(ctx context.Context, root string, status bool, path string) ([]byte
 		}
 		return nil, ErrGitExecution
 	}
-	return stdout.buffer.Bytes(), nil
+	return stdout, nil
 }

@@ -1,20 +1,15 @@
 package application
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
-	"time"
 
 	"dev-orchestrator/internal/domain"
 )
-
-const MaxTestOutputBytes = 1024 * 1024   // Per stream; overflow is an explicit error.
-const RunTestsTimeout = 60 * time.Second // Local MVP limit; centralization belongs to P2.8.
 
 var (
 	ErrUnknownTestTarget = errors.New("unknown test target ID")
@@ -52,30 +47,22 @@ type RunTestsResult struct {
 	ExitCode int
 }
 
-type testOutput struct {
-	buffer   bytes.Buffer
-	exceeded bool
-}
-
-func (b *testOutput) Write(p []byte) (int, error) {
-	if len(p) > MaxTestOutputBytes-b.buffer.Len() {
-		b.exceeded = true
-		return 0, ErrTestOutputLimit
-	}
-	return b.buffer.Write(p)
-}
-
 // RunTests executes only the registry's Go package target, without a shell.
 // CommandContext kills the Go process, not necessarily descendant test binaries.
-// WaitDelay bounds pipe waiting; process-tree cleanup is deferred to P2.8.
+// WaitDelay bounds pipe waiting; reliable process-tree cleanup remains future
+// platform-specific hardening, as documented in runLimitedProcess.
 // Sandbox validation is a snapshot, as documented by WorkspaceSandbox.
 func RunTests(ctx context.Context, workspace string, params domain.RunTestsParams) (RunTestsResult, error) {
 	result := RunTestsResult{Target: params.Target, ExitCode: -1}
+	if err := ctx.Err(); err != nil {
+		return result, err
+	}
 	target, err := (TestTargetRegistry{}).Resolve(params.Target)
 	if err != nil {
 		return result, err
 	}
-	ctx, cancel := context.WithTimeout(ctx, RunTestsTimeout)
+	limits := testProcessLimits()
+	ctx, cancel := processContext(ctx, limits)
 	defer cancel()
 	if err := ctx.Err(); err != nil {
 		return result, err
@@ -112,18 +99,15 @@ func RunTests(ctx context.Context, workspace string, params domain.RunTestsParam
 		}
 	}
 	cmd.Env = append(cmd.Env, "GOENV=off", "GOWORK=off", "GOFLAGS=", "GOTOOLCHAIN=local", "GO111MODULE=on")
-	var stdout, stderr testOutput
-	cmd.Stdout, cmd.Stderr = &stdout, &stderr
-	cmd.WaitDelay = time.Second
-	err = cmd.Run()
-	result.Stdout, result.Stderr = stdout.buffer.String(), stderr.buffer.String()
+	stdout, stderr, err := runLimitedProcess(ctx, cmd, limits)
+	result.Stdout, result.Stderr = string(stdout), string(stderr)
 	if cmd.ProcessState != nil {
 		result.ExitCode = cmd.ProcessState.ExitCode()
 	}
 	if ctx.Err() != nil {
 		return result, ctx.Err()
 	}
-	if stdout.exceeded || stderr.exceeded {
+	if errors.Is(err, ErrProcessOutputLimit) {
 		return result, ErrTestOutputLimit
 	}
 	if err != nil {

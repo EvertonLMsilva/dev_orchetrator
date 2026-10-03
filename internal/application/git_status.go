@@ -15,6 +15,9 @@ type GitStatusResult struct{ Entries []GitStatusEntry }
 type GitStatusExecutor struct{}
 
 func (GitStatusExecutor) Execute(ctx context.Context, workspace string) (GitStatusResult, error) {
+	if err := ctx.Err(); err != nil {
+		return GitStatusResult{}, err
+	}
 	root, err := gitWorkspace(workspace)
 	if err != nil {
 		return GitStatusResult{}, err

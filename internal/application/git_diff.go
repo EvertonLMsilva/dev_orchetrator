@@ -13,6 +13,9 @@ type GitDiffResult struct {
 type GitDiffExecutor struct{}
 
 func (GitDiffExecutor) Execute(ctx context.Context, workspace, path string) (GitDiffResult, error) {
+	if err := ctx.Err(); err != nil {
+		return GitDiffResult{}, err
+	}
 	root, err := gitWorkspace(workspace)
 	if err != nil {
 		return GitDiffResult{}, err

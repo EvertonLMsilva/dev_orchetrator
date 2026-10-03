@@ -173,11 +173,11 @@ func TestRunTestsStderr(t *testing.T) {
 func TestTestOutputStreamsBounded(t *testing.T) {
 	for _, stream := range []string{"stdout", "stderr"} {
 		t.Run(stream, func(t *testing.T) {
-			var output testOutput
+			output := processOutput{limit: MaxTestOutputBytes, stop: func() {}}
 			if _, err := output.Write(make([]byte, MaxTestOutputBytes)); err != nil {
 				t.Fatal(err)
 			}
-			if _, err := output.Write([]byte("x")); !errors.Is(err, ErrTestOutputLimit) || output.buffer.Len() > MaxTestOutputBytes {
+			if _, err := output.Write([]byte("x")); !errors.Is(err, ErrProcessOutputLimit) || output.buffer.Len() > MaxTestOutputBytes {
 				t.Fatal(err)
 			}
 		})
