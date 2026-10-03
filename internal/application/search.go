@@ -1,12 +1,14 @@
 package application
 
 import (
+	"context"
 	"errors"
 	"io/fs"
 	"path/filepath"
 	"strings"
 
 	"dev-orchestrator/internal/domain"
+	"dev-orchestrator/internal/ports"
 )
 
 const (
@@ -14,23 +16,24 @@ const (
 	MaxSearchFileBytes = 256 * 1024
 )
 
-type SearchMatch struct {
-	Path string
-	Line int
-	Text string
-}
+type SearchMatch = ports.SearchMatch
 
-type SearchResult struct {
-	Matches []SearchMatch
-	Limited bool
-}
+type SearchResult = ports.SearchResult
 
 type SearchExecutor struct{}
 
 // Execute performs literal, case-sensitive matching, returning one match per
 // line in lexical path order and ascending line order. Oversized and binary
 // files are skipped entirely. Directory symlinks are never traversed.
-func (SearchExecutor) Execute(workspace, query, path string) (SearchResult, error) {
+func (e SearchExecutor) Execute(workspace, query, path string) (SearchResult, error) {
+	return e.ExecuteContext(context.Background(), workspace, query, path)
+}
+
+// ExecuteContext preserves caller cancellation during bounded file traversal.
+func (SearchExecutor) ExecuteContext(ctx context.Context, workspace, query, path string) (SearchResult, error) {
+	if err := ctx.Err(); err != nil {
+		return SearchResult{}, err
+	}
 	result := SearchResult{Matches: []SearchMatch{}}
 	if strings.TrimSpace(query) == "" {
 		return SearchResult{}, domain.ErrSearchQueryRequired
@@ -52,6 +55,9 @@ func (SearchExecutor) Execute(workspace, query, path string) (SearchResult, erro
 		return SearchResult{}, ErrUnsafePath
 	}
 	err = fs.WalkDir(access.FS(), filepath.ToSlash(rel), func(name string, entry fs.DirEntry, walkErr error) error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		if walkErr != nil {
 			return capabilityError(walkErr)
 		}
@@ -71,6 +77,9 @@ func (SearchExecutor) Execute(workspace, query, path string) (SearchResult, erro
 		}
 		// The entire buffer is bounded by MaxSearchFileBytes; no project index is kept.
 		for i, line := range strings.Split(string(content), "\n") {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
 			if !strings.Contains(line, query) {
 				continue
 			}

@@ -3,15 +3,12 @@ package application
 import (
 	"bytes"
 	"context"
+
+	"dev-orchestrator/internal/ports"
 )
 
-type GitStatusEntry struct {
-	Path           string
-	OriginalPath   string
-	IndexStatus    string
-	WorkTreeStatus string
-}
-type GitStatusResult struct{ Entries []GitStatusEntry }
+type GitStatusEntry = ports.GitStatusEntry
+type GitStatusResult = ports.GitStatusResult
 type GitStatusExecutor struct{}
 
 func (GitStatusExecutor) Execute(ctx context.Context, workspace string) (GitStatusResult, error) {

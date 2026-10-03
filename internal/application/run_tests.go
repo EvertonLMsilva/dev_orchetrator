@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"dev-orchestrator/internal/domain"
+	"dev-orchestrator/internal/ports"
 )
 
 var (
@@ -39,13 +40,7 @@ func (TestTargetRegistry) Resolve(id domain.TestTargetID) (string, error) {
 	}
 }
 
-type RunTestsResult struct {
-	Target   domain.TestTargetID
-	Stdout   string
-	Stderr   string
-	Success  bool
-	ExitCode int
-}
+type RunTestsResult = ports.RunTestsResult
 
 // RunTests executes only the registry's Go package target, without a shell.
 // CommandContext kills the Go process, not necessarily descendant test binaries.

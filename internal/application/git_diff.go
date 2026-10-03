@@ -3,13 +3,11 @@ package application
 import (
 	"context"
 	"path/filepath"
+
+	"dev-orchestrator/internal/ports"
 )
 
-type GitDiffResult struct {
-	Path  string
-	Diff  string
-	Bytes int
-}
+type GitDiffResult = ports.GitDiffResult
 type GitDiffExecutor struct{}
 
 func (GitDiffExecutor) Execute(ctx context.Context, workspace, path string) (GitDiffResult, error) {

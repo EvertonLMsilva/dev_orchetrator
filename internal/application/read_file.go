@@ -2,12 +2,15 @@ package application
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"io"
 	"os"
 	"path/filepath"
 	"runtime"
 	"unicode/utf8"
+
+	"dev-orchestrator/internal/ports"
 )
 
 const MaxReadFileBytes = 256 * 1024
@@ -19,15 +22,19 @@ var (
 	ErrBinaryFile     = errors.New("file is not text")
 )
 
-type ReadFileResult struct {
-	Path    string
-	Content string
-	Size    int64
-}
+type ReadFileResult = ports.ReadFileResult
 
 type ReadFileExecutor struct{}
 
-func (ReadFileExecutor) Execute(workspace, path string) (ReadFileResult, error) {
+func (e ReadFileExecutor) Execute(workspace, path string) (ReadFileResult, error) {
+	return e.ExecuteContext(context.Background(), workspace, path)
+}
+
+// ExecuteContext checks cancellation around the existing bounded file read.
+func (ReadFileExecutor) ExecuteContext(ctx context.Context, workspace, path string) (ReadFileResult, error) {
+	if err := ctx.Err(); err != nil {
+		return ReadFileResult{}, err
+	}
 	access, err := openCapabilityWorkspace(workspace)
 	if err != nil {
 		return ReadFileResult{}, err
@@ -37,7 +44,13 @@ func (ReadFileExecutor) Execute(workspace, path string) (ReadFileResult, error) 
 	if err != nil {
 		return ReadFileResult{}, errors.Join(ErrUnsafePath, capabilityError(err))
 	}
+	if err := ctx.Err(); err != nil {
+		return ReadFileResult{}, err
+	}
 	content, size, err := readCapabilityFile(access, resolved, MaxReadFileBytes)
+	if contextErr := ctx.Err(); contextErr != nil {
+		return ReadFileResult{}, contextErr
+	}
 	if err != nil {
 		return ReadFileResult{}, err
 	}
