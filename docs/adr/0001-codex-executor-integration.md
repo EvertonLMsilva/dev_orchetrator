@@ -1,7 +1,7 @@
 # ADR 0001 — Integração oficial do Executor com OpenAI/Codex
 
 - Data: 2026-10-03
-- Status: Accepted for MVP behind ExecutorPort; revisada por P4.1b, com gate de smoke test antes de P4.4.
+- Status: Accepted for MVP behind ExecutorPort; P4.4 implementation LIBERADO, live integration BLOCKED por B-P4-001.
 - Task original: P4.1 — Official Codex Integration Discovery + ADR
 - Amendment: P4.1b — autenticação/custo via conta ChatGPT.
 
@@ -197,9 +197,9 @@ Workspace nunca é fornecido livremente por Discord/Planner; o sistema o
 resolve a partir de `ProjectID`. Esta tarefa não implementa esse mapeamento,
 Discord, workflow, OAuth, app-server ou mudanças nos contratos existentes.
 
-## Próximo gate: smoke test descartável
+## Gate original: smoke test descartável
 
-Antes da implementação definitiva de P4.4, comprovar:
+O gate original exigia, antes da implementação definitiva de P4.4, comprovar:
 
 ```text
 ChatGPT authentication
@@ -216,6 +216,98 @@ result returned
 Requisitos: sem `OPENAI_API_KEY`, fora do código de produção, sem commit de
 código experimental, sem workspace real do projeto inicialmente, sem Docker
 socket, sem exposição de secrets e com tarefa mínima descartável.
-Somente após esse teste passar implementar P4.4. O smoke test não é executado
-em P4.1b; disponibilidade/autorização e execução efetiva ainda devem ser
-comprovadas nesse gate.
+O gate original condicionava a implementação de P4.4 ao sucesso desse teste.
+O smoke test não foi executado em P4.1b. A decisão abaixo substitui essa
+condição para implementação; execução live e resultado continuam pendentes.
+
+## Resultado dos spikes e decisão P4.4
+
+Os spikes com Codex CLI/app-server `0.159.2` comprovaram:
+
+```text
+ChatGPT authentication = PASS
+OPENAI_API_KEY = NOT USED
+Docker Linux = PASS
+container isolation = VERIFIED
+codex app-server = PASS
+programmatic connection = PASS
+/workspace mount = PASS
+cwd=/workspace = PASS
+runtimeWorkspaceRoots=["/workspace"] = PASS
+repository isolation = PASS
+Docker socket not exposed = PASS
+host root not mounted = PASS
+```
+
+`workspace routing discovery failed` ocorreu durante `account/read`, antes
+de `thread/start` ou envio da tarefa. `workspaceRouting` refere-se ao
+roteamento da conta ChatGPT, com conceitos como `chatgptAccountId`,
+`backendOrigin` e `accountRoutingOverride`, e não ao filesystem `/workspace`.
+Não há evidência de `/workspace` incorreto, necessidade de Git ou falha do
+isolamento Docker. A causa interna não foi comprovada.
+
+### B-P4-001 — ChatGPT account workspace routing discovery
+
+**OPEN.** Codex app-server `0.159.2`, autenticado via ChatGPT sem API key,
+pode retornar `workspace routing discovery failed` durante `account/read`.
+A causa interna não é exposta suficientemente para configuração segura pelo
+Orchestrator. Até resolução ou contrato suportado, P4.4 implementation é
+**LIBERADO/allowed** e live ChatGPT execution é **BLOCKED**.
+
+Não preencher `chatgptAccountId` manualmente sem contrato oficial, inventar
+`backendOrigin` ou `accountRoutingOverride`, contornar autenticação ou trocar
+automaticamente para API key. Aplicar fail closed, normalizar a falha do
+provider/runtime e retornar falha controlada, sem mascarar sucesso, ampliar
+permissões ou mudar autenticação. Detalhes de `CODEX_RESULT` ficam no P4.5.
+
+### TD-P4-001 — Codex app-server permission-profile isolation
+
+**OPEN.** Codex `0.159.2` não forneceu, no fluxo investigado, contrato
+inequívoco para configurar o permission profile restrito desejado. Para o
+MVP, a fronteira primária aprovada é:
+
+```text
+Host
+ ↓
+Docker/Linux disposable container
+ ↓
+authorized workspace mount only
+ ↓
+Codex app-server
+```
+
+O spike comprovou `privileged=no`, `Docker socket exposed=no`,
+`host root mounted=no`, `sentinel visible=no`,
+`Dev Orchestrator repository visible=no` e `host isolation verified=yes`.
+Dentro desse container isolado, a política observada foi `dangerFullAccess`.
+**`dangerFullAccess` NÃO é permitido diretamente no host**; só pode ser
+considerado dentro da fronteira Docker isolada aprovada. Quando houver
+contrato estável/verificável de permission profile, implementar defesa em
+profundidade: `Docker isolation + Codex sandbox`.
+
+### Continuidade estrutural
+
+Preservamos app-server porque autenticação ChatGPT, app-server, conexão
+programática e isolamento Docker foram comprovados; o bloqueio observado
+está isolado no account routing. Ports & Adapters permite prosseguir sem
+contaminar domínio/application nem alterar os contratos de P4.2/P4.3.
+A direção arquitetural, sem afirmar que esses tipos concretos já existem, é:
+
+```text
+ExecutorPort
+      ↓
+CodexProviderAdapter
+      ↓
+CodexRuntimePort
+      ↓
+DockerCodexRuntime
+      ↓
+codex app-server
+```
+
+Docker, app-server, OAuth, account routing, provider IDs e eventos Codex
+ficam na infraestrutura/adapter. A implementação P4.4 deve usar TDD sem
+dependência live. No P4.6, fake runtime, deterministic test double ou
+controlled local runtime podem validar integração do Executor enquanto
+`B-P4-001` estiver aberto; isso não é evidência live, cuja validação permanece
+separadamente bloqueada.
