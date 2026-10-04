@@ -7,7 +7,10 @@ import (
 
 // CodexThreadID is provider-specific and stays inside infrastructure. Its zero
 // value is untrusted; only a correlated, validated response produces a value.
-type CodexThreadID struct{ value string }
+type CodexThreadID struct {
+	value string
+	turn  *codexTurnCapability
+}
 
 // codexReadySession owns one thread-start opportunity after initialize and
 // initialized succeed. Keep it by pointer; concurrent calls are serialized.
@@ -65,7 +68,7 @@ func (s *codexReadySession) StartThread() (CodexThreadID, error) {
 		if message.Response == nil || message.Response.ThreadStart == nil {
 			return CodexThreadID{}, errors.New("codex thread start unexpected response")
 		}
-		return CodexThreadID{value: message.Response.ThreadStart.Thread.ID}, nil
+		return CodexThreadID{value: message.Response.ThreadStart.Thread.ID, turn: &codexTurnCapability{transport: transport}}, nil
 	}
 	return CodexThreadID{}, errors.New("codex thread start notification limit exceeded")
 }
