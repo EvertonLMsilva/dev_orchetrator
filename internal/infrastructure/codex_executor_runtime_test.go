@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"reflect"
 	"strings"
 	"sync"
@@ -23,6 +24,173 @@ type executorSessionFake struct {
 	closeErr error
 }
 
+type compositionDockerFake struct {
+	*fakeCodexProcessDocker
+	config                       DockerEnvironmentConfig
+	createErr, containerStartErr error
+	partial                      bool
+	cancelCreate, cancelStart    context.CancelFunc
+	emptyID                      bool
+}
+
+func (d *compositionDockerFake) createCodexContainer(ctx context.Context, config DockerEnvironmentConfig) (string, error) {
+	d.record("create")
+	d.config = config
+	if d.cancelCreate != nil {
+		d.cancelCreate()
+	}
+	if d.emptyID {
+		return "", nil
+	}
+	if d.createErr != nil && !d.partial {
+		return "", d.createErr
+	}
+	return "container", d.createErr
+}
+func (d *compositionDockerFake) Create(context.Context, DockerEnvironmentConfig) (string, error) {
+	panic("probe fallback")
+}
+func (d *compositionDockerFake) Start(context.Context, string) error {
+	d.record("container-start")
+	if d.cancelStart != nil {
+		d.cancelStart()
+	}
+	return d.containerStartErr
+}
+func (d *compositionDockerFake) Stop(context.Context, string) error { panic("probe fallback") }
+
+func TestDockerCodexSessionComposition(t *testing.T) {
+	for _, workspace := range []string{"/trusted/workspace-a", "/trusted/workspace-b"} {
+		t.Run(workspace, func(t *testing.T) {
+			reader, writer := io.Pipe()
+			defer writer.Close()
+			d := &compositionDockerFake{fakeCodexProcessDocker: &fakeCodexProcessDocker{output: reader}}
+			env := NewDockerExecutionEnvironment(d)
+			runtime := NewCodexExecutorRuntime(env.startCodexSession)
+			go func() {
+				for _, event := range []string{handshakeResponse, threadResponse, turnResponse, turnDelta("done"), turnEvent("completed")} {
+					if _, err := writer.Write(codexDockerFrame(1, event+"\n")); err != nil {
+						return
+					}
+				}
+			}()
+			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+			defer cancel()
+			request := executionRequest()
+			request.Workspace = workspace
+			result, err := runtime.Execute(ctx, request)
+			if err != nil || result.Outcome != ports.ExecutorOutcomeDone || result.Summary != "done" {
+				t.Fatalf("%#v %v", result, err)
+			}
+			if d.config.WorkspaceSource() != workspace || d.config.WorkspaceTarget() != "/workspace" || d.config.WorkingDirectory() != "/workspace" || d.config.Privileged() || d.config.AuthTmpfsTarget() != "" {
+				t.Fatal("unsafe binding")
+			}
+			if !reflect.DeepEqual(d.calls, []string{"create", "container-start", "start", "closeWrite", "stop", "remove"}) {
+				t.Fatal(d.calls)
+			}
+		})
+	}
+}
+
+func TestDockerCodexSessionFailures(t *testing.T) {
+	for _, stage := range []string{"create", "partial-create", "container-start", "process", "remove"} {
+		t.Run(stage, func(t *testing.T) {
+			d := &compositionDockerFake{fakeCodexProcessDocker: &fakeCodexProcessDocker{}}
+			failure := errors.New("private daemon detail")
+			switch stage {
+			case "create":
+				d.createErr = failure
+			case "partial-create":
+				d.createErr = failure
+				d.partial = true
+			case "container-start":
+				d.containerStartErr = failure
+			case "process":
+				d.startErr = failure
+			case "remove":
+				d.containerStartErr = failure
+				d.removeErr = failure
+			}
+			env := NewDockerExecutionEnvironment(d)
+			_, err := NewCodexExecutorRuntime(env.startCodexSession).Execute(context.Background(), ports.RuntimeExecutionRequest{Workspace: "/trusted/project"})
+			if err == nil || strings.Contains(err.Error(), "private daemon detail") {
+				t.Fatal("failure must remain opaque")
+			}
+			if stage != "create" && d.calls[len(d.calls)-1] != "remove" {
+				t.Fatal("cleanup skipped", d.calls)
+			}
+		})
+	}
+}
+
+func TestDockerCodexSessionCancellation(t *testing.T) {
+	reader, writer := io.Pipe()
+	defer writer.Close()
+	d := &compositionDockerFake{fakeCodexProcessDocker: &fakeCodexProcessDocker{output: reader}}
+	env := NewDockerExecutionEnvironment(d)
+	ctx, cancel := context.WithCancel(context.Background())
+	session, err := env.startCodexSession(ctx, DockerEnvironmentConfig{workspace: "/trusted/project"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cancel()
+	if _, err := session.Read(); err == nil {
+		t.Fatal("read was not canceled")
+	}
+	if err := session.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if d.calls[len(d.calls)-1] != "remove" {
+		t.Fatal(d.calls)
+	}
+}
+
+func TestDockerCodexSessionCreationGuards(t *testing.T) {
+	for _, workspace := range []string{"", "relative", "/", "/trusted/..", "/var/run/docker.sock", "/run/docker.sock", "/trusted/\x00project"} {
+		d := &compositionDockerFake{fakeCodexProcessDocker: &fakeCodexProcessDocker{}}
+		env := NewDockerExecutionEnvironment(d)
+		if _, err := NewCodexExecutorRuntime(env.startCodexSession).Execute(context.Background(), ports.RuntimeExecutionRequest{Workspace: workspace}); err == nil || len(d.calls) != 0 {
+			t.Fatalf("unsafe workspace %q: %v", workspace, err)
+		}
+	}
+	for _, stage := range []string{"create", "start"} {
+		ctx, cancel := context.WithCancel(context.Background())
+		d := &compositionDockerFake{fakeCodexProcessDocker: &fakeCodexProcessDocker{}}
+		if stage == "create" {
+			d.cancelCreate = cancel
+		} else {
+			d.cancelStart = cancel
+		}
+		env := NewDockerExecutionEnvironment(d)
+		_, err := env.startCodexSession(ctx, DockerEnvironmentConfig{workspace: "/trusted/project"})
+		cancel()
+		if !errors.Is(err, context.Canceled) || d.calls[len(d.calls)-1] != "remove" {
+			t.Fatalf("%s cancellation: %v %v", stage, err, d.calls)
+		}
+		for _, call := range d.calls {
+			if call == "start" {
+				t.Fatal("canceled creation started process")
+			}
+		}
+	}
+	d := &compositionDockerFake{fakeCodexProcessDocker: &fakeCodexProcessDocker{}, emptyID: true}
+	env := NewDockerExecutionEnvironment(d)
+	if _, err := env.startCodexSession(context.Background(), DockerEnvironmentConfig{workspace: "/trusted/project"}); err == nil || !reflect.DeepEqual(d.calls, []string{"create"}) {
+		t.Fatal("empty ID accepted")
+	}
+	for _, authConfig := range []bool{false, true} {
+		d = &compositionDockerFake{fakeCodexProcessDocker: &fakeCodexProcessDocker{}}
+		env = NewDockerExecutionEnvironment(d)
+		env.authRequired = !authConfig
+		if _, err := env.startCodexSession(context.Background(), DockerEnvironmentConfig{workspace: "/trusted/project", authTmpfs: authConfig}); err == nil || len(d.calls) != 0 {
+			t.Fatal("authenticated session accepted")
+		}
+	}
+	if _, err := NewDockerCodexExecutorRuntime(nil).Execute(context.Background(), ports.RuntimeExecutionRequest{Workspace: "/trusted/project"}); err == nil {
+		t.Fatal("nil concrete driver accepted")
+	}
+}
+
 func (f *executorSessionFake) Close() error {
 	f.once.Do(func() { f.closes++; close(f.closed) })
 	return f.closeErr
@@ -36,13 +204,13 @@ func (f *executorSessionFake) Read() ([]byte, error) {
 	return f.threadFake.Read()
 }
 func executionRequest() ports.RuntimeExecutionRequest {
-	return ports.RuntimeExecutionRequest{ProjectID: "project", TaskID: "task", Workspace: `C:\private\host`, Objective: "fix $(shell)", Scope: []string{"src/a.go"}, Constraints: []string{"no network"}, AcceptanceCriteria: []string{"tests pass"}}
+	return ports.RuntimeExecutionRequest{ProjectID: "project", TaskID: "task", Workspace: `/private/host`, Objective: "fix $(shell)", Scope: []string{"src/a.go"}, Constraints: []string{"no network"}, AcceptanceCriteria: []string{"tests pass"}}
 }
 func executionFake(events ...string) *executorSessionFake {
 	return &executorSessionFake{threadFake: threadFake{messages: events}, closed: make(chan struct{})}
 }
 func executeFake(ctx context.Context, f *executorSessionFake) (ports.RuntimeExecutionResult, error) {
-	return NewCodexExecutorRuntime(func(context.Context) (CodexExecutorSession, error) { return f, nil }).Execute(ctx, executionRequest())
+	return NewCodexExecutorRuntime(func(context.Context, DockerEnvironmentConfig) (CodexExecutorSession, error) { return f, nil }).Execute(ctx, executionRequest())
 }
 func TestCodexExecutorComposition(t *testing.T) {
 	for _, tc := range []struct {
@@ -154,14 +322,19 @@ func TestCodexExecutorCancellation(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	called := false
-	_, err := NewCodexExecutorRuntime(func(context.Context) (CodexExecutorSession, error) { called = true; return nil, nil }).Execute(ctx, executionRequest())
+	_, err := NewCodexExecutorRuntime(func(context.Context, DockerEnvironmentConfig) (CodexExecutorSession, error) {
+		called = true
+		return nil, nil
+	}).Execute(ctx, executionRequest())
 	if !errors.Is(err, context.Canceled) || called {
 		t.Fatal("pre-cancelled context started session")
 	}
 }
 func TestCodexExecutorStartupAndCleanupFailure(t *testing.T) {
 	f := executionFake()
-	got, err := NewCodexExecutorRuntime(func(context.Context) (CodexExecutorSession, error) { return f, errors.New("startup-secret") }).Execute(context.Background(), executionRequest())
+	got, err := NewCodexExecutorRuntime(func(context.Context, DockerEnvironmentConfig) (CodexExecutorSession, error) {
+		return f, errors.New("startup-secret")
+	}).Execute(context.Background(), executionRequest())
 	if err == nil || got != (ports.RuntimeExecutionResult{}) || f.closes != 1 || strings.Contains(err.Error(), "startup-secret") {
 		t.Fatal("startup failure")
 	}
@@ -171,7 +344,7 @@ func TestCodexExecutorStartupAndCleanupFailure(t *testing.T) {
 	if err == nil || got != (ports.RuntimeExecutionResult{}) || strings.Contains(err.Error(), "cleanup-secret") {
 		t.Fatal("cleanup failure")
 	}
-	for _, factory := range []CodexExecutorSessionFactory{nil, func(context.Context) (CodexExecutorSession, error) { return nil, nil }} {
+	for _, factory := range []CodexExecutorSessionFactory{nil, func(context.Context, DockerEnvironmentConfig) (CodexExecutorSession, error) { return nil, nil }} {
 		if got, err := NewCodexExecutorRuntime(factory).Execute(context.Background(), executionRequest()); err == nil || got != (ports.RuntimeExecutionResult{}) {
 			t.Fatal("missing seam accepted")
 		}
@@ -191,7 +364,7 @@ func TestCodexExecutorCancellationAtCreation(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	f := executionFake()
-	got, err := NewCodexExecutorRuntime(func(context.Context) (CodexExecutorSession, error) {
+	got, err := NewCodexExecutorRuntime(func(context.Context, DockerEnvironmentConfig) (CodexExecutorSession, error) {
 		cancel()
 		return f, nil
 	}).Execute(ctx, executionRequest())

@@ -20,8 +20,9 @@ type CodexExecutorSession interface {
 
 // CodexExecutorSessionFactory creates one controlled session per execution.
 // It must respect ctx and release resources on failure, or return the partially
-// created session for cleanup. No live factory is wired by this composition.
-type CodexExecutorSessionFactory func(context.Context) (CodexExecutorSession, error)
+// created session for cleanup. Config exposes only the authorized workspace;
+// callers cannot select image, commands, mounts or authentication.
+type CodexExecutorSessionFactory func(context.Context, DockerEnvironmentConfig) (CodexExecutorSession, error)
 
 type CodexExecutorRuntime struct{ start CodexExecutorSessionFactory }
 
@@ -32,6 +33,12 @@ func NewCodexExecutorRuntime(start CodexExecutorSessionFactory) *CodexExecutorRu
 	return &CodexExecutorRuntime{start: start}
 }
 
+// NewDockerCodexExecutorRuntime binds every request's trusted host workspace to
+// one disposable, unauthenticated Docker session. The driver remains caller-owned.
+func NewDockerCodexExecutorRuntime(driver *DockerDriver) *CodexExecutorRuntime {
+	return NewCodexExecutorRuntime(NewDockerExecutionEnvironment(driver).startCodexSession)
+}
+
 func (r *CodexExecutorRuntime) Execute(ctx context.Context, request ports.RuntimeExecutionRequest) (result ports.RuntimeExecutionResult, err error) {
 	if err = ctx.Err(); err != nil {
 		return
@@ -39,7 +46,11 @@ func (r *CodexExecutorRuntime) Execute(ctx context.Context, request ports.Runtim
 	if r == nil || r.start == nil {
 		return result, errors.New("codex executor session factory required")
 	}
-	session, startErr := r.start(ctx)
+	config, configErr := executionWorkspaceConfig(request.Workspace)
+	if configErr != nil {
+		return result, configErr
+	}
+	session, startErr := r.start(ctx, config)
 	if session == nil {
 		if ctx.Err() != nil {
 			return result, ctx.Err()

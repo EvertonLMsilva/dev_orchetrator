@@ -54,20 +54,86 @@ func NewDockerExecutionEnvironment(docker DockerLifecycle) *DockerExecutionEnvir
 	return &DockerExecutionEnvironment{docker: docker}
 }
 
+// The application has physically validated this workspace. Infrastructure only
+// checks the boundary value and preserves it exactly; it never resolves a fallback.
+func executionWorkspaceConfig(workspace string) (DockerEnvironmentConfig, error) {
+	if strings.TrimSpace(workspace) == "" || strings.ContainsRune(workspace, '\x00') ||
+		(!filepath.IsAbs(workspace) && !path.IsAbs(workspace)) {
+		return DockerEnvironmentConfig{}, errors.New("docker environment requires an absolute workspace")
+	}
+	clean := filepath.Clean(workspace)
+	if filepath.Dir(clean) == clean || path.Clean(workspace) == "/" ||
+		path.Clean(workspace) == "/var/run/docker.sock" || path.Clean(workspace) == "/run/docker.sock" {
+		return DockerEnvironmentConfig{}, errors.New("docker environment rejects host root or Docker socket workspace")
+	}
+	return DockerEnvironmentConfig{workspace: workspace}, nil
+}
+
+type codexSessionDocker interface {
+	codexProcessDocker
+	createCodexContainer(context.Context, DockerEnvironmentConfig) (string, error)
+	Start(context.Context, string) error
+}
+
+// startCodexSession owns partial creation until the process transport takes
+// ownership. Both paths remove resources using fresh, bounded cleanup contexts.
+func (e *DockerExecutionEnvironment) startCodexSession(ctx context.Context, config DockerEnvironmentConfig) (CodexExecutorSession, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if e == nil || e.authRequired || config.authTmpfs {
+		return nil, errors.New("unauthenticated codex environment required")
+	}
+	if _, err := executionWorkspaceConfig(config.workspace); err != nil {
+		return nil, err
+	}
+	driver, ok := e.docker.(codexSessionDocker)
+	if !ok || driver == nil {
+		return nil, errors.New("codex session driver required")
+	}
+	id, err := driver.createCodexContainer(ctx, config)
+	cleanup := func(failure error) error {
+		if id == "" {
+			return failure
+		}
+		cleanupCtx, cancel := context.WithTimeout(context.Background(), dockerOperationTimeout)
+		defer cancel()
+		if driver.Remove(cleanupCtx, id) != nil {
+			return errors.Join(failure, errors.New("codex session container cleanup failed"))
+		}
+		return failure
+	}
+	if err != nil {
+		return nil, cleanup(errors.New("codex session container creation failed"))
+	}
+	if id == "" {
+		return nil, errors.New("codex session empty container ID")
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, cleanup(err)
+	}
+	if driver.Start(ctx, id) != nil {
+		return nil, cleanup(errors.New("codex session container start failed"))
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, cleanup(err)
+	}
+	// Ownership now transfers, including when process startup fails.
+	transport, err := startCodexProcessRuntime(ctx, driver, id)
+	if err != nil {
+		return nil, err
+	}
+	return transport, nil
+}
+
 // RunLifecycle prepares, starts and cleans up an isolated environment. It does
 // not execute Codex or produce RuntimeExecutionResult, and is not ExecutorRuntime.
 // The workspace is already physically validated by the application layer; these
 // checks only reject unsafe boundary values without resolving a different path.
 func (e *DockerExecutionEnvironment) RunLifecycle(ctx context.Context, request ports.RuntimeExecutionRequest) (resultErr error) {
 	workspace := request.Workspace
-	if strings.TrimSpace(workspace) == "" || strings.ContainsRune(workspace, '\x00') ||
-		(!filepath.IsAbs(workspace) && !path.IsAbs(workspace)) {
-		return errors.New("docker environment requires an absolute workspace")
-	}
-	clean := filepath.Clean(workspace)
-	if filepath.Dir(clean) == clean || path.Clean(workspace) == "/" ||
-		path.Clean(workspace) == "/var/run/docker.sock" || path.Clean(workspace) == "/run/docker.sock" {
-		return errors.New("docker environment rejects host root or Docker socket workspace")
+	if _, err := executionWorkspaceConfig(workspace); err != nil {
+		return err
 	}
 	if e == nil || e.docker == nil {
 		return errors.New("docker environment requires a lifecycle driver")

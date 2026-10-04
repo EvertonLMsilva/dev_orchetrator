@@ -26,6 +26,135 @@ import (
 
 const codexRuntimeSmokeImage = "dev-orchestrator-codex-runtime:0.159.2"
 
+func TestDockerCodexSessionFixedOptions(t *testing.T) {
+	for _, workspace := range []string{"/trusted/a", "/trusted/b"} {
+		opts := codexSessionCreateOptions(DockerEnvironmentConfig{workspace: workspace})
+		if opts.Config.Image != codexRuntimeSmokeImage || opts.Config.Image == dockerProbeImage || opts.Config.WorkingDir != "/workspace" || !reflect.DeepEqual([]string(opts.Config.Cmd), []string{"/bin/sleep", "300"}) || len(opts.Config.Env) != 0 || opts.HostConfig.Privileged || opts.HostConfig.NetworkMode != "none" || opts.Platform.OS != "linux" {
+			t.Fatal("unsafe session options")
+		}
+		mounts := opts.HostConfig.Mounts
+		if len(mounts) != 1 || mounts[0].Type != mount.TypeBind || mounts[0].Source != workspace || mounts[0].Target != "/workspace" {
+			t.Fatal("workspace not bound")
+		}
+		opts.Config.Image = "untrusted"
+		mounts[0].Target = "/"
+		fresh := codexSessionCreateOptions(DockerEnvironmentConfig{workspace: workspace})
+		if fresh.Config.Image != codexRuntimeSmokeImage || fresh.HostConfig.Mounts[0].Target != "/workspace" {
+			t.Fatal("mutable security configuration")
+		}
+	}
+}
+
+// Real composition proof stops at initialize/initialized. The test runner alone
+// has daemon access; the Codex container gets only its temporary workspace.
+func TestDockerCodexSessionRealHandshake(t *testing.T) {
+	if os.Getenv("DEV_ORCHESTRATOR_CODEX_COMPOSITION") != "1" {
+		t.Skip("opt-in unauthenticated Docker composition")
+	}
+	workspace := os.Getenv("DEV_ORCHESTRATOR_INTEGRATION_WORKSPACE")
+	localRoot := os.Getenv("DEV_ORCHESTRATOR_INTEGRATION_LOCAL_WORKSPACE")
+	if workspace == "" || localRoot == "" {
+		t.Fatal("dedicated temporary workspace required")
+	}
+	if err := os.MkdirAll(filepath.Join(localRoot, "workspace"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(localRoot, "workspace", "composition-sentinel"), []byte("p4412b-workspace"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(localRoot, "host-only-sentinel"), []byte("outside workspace"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	defer cancel()
+	d, err := NewDockerDriver()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.Close()
+	request := ports.RuntimeExecutionRequest{Workspace: workspace}
+	config, err := executionWorkspaceConfig(request.Workspace)
+	if err != nil {
+		t.Fatal(err)
+	}
+	session, err := NewDockerCodexExecutorRuntime(d).start(ctx, config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer session.Close()
+	transport := session.(*CodexProcessTransport)
+	id := transport.containerID
+	inspected, err := d.client.ContainerInspect(ctx, id, client.ContainerInspectOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := inspected.Container
+	if c.Config.Image != codexRuntimeImage || c.Config.WorkingDir != "/workspace" || c.HostConfig.Privileged || c.HostConfig.NetworkMode != "none" || len(c.Mounts) != 1 || c.Mounts[0].Source != workspace || c.Mounts[0].Destination != "/workspace" {
+		t.Fatal("real container security/binding violated")
+	}
+	for _, env := range c.Config.Env {
+		if strings.HasPrefix(env, "OPENAI_API_KEY=") || strings.HasPrefix(env, "CODEX_API_KEY=") {
+			t.Fatal("unexpected credential environment")
+		}
+	}
+	for _, cmd := range [][]string{
+		{"/usr/bin/test", "-d", "/workspace"},
+		{"/bin/grep", "-qx", "p4412b-workspace", "/workspace/composition-sentinel"},
+		{"/usr/bin/test", "!", "-e", "/var/run/docker.sock"},
+		{"/usr/bin/test", "!", "-e", "/host-only-sentinel"},
+		{"/usr/bin/test", "!", "-e", "/run/codex-process/auth.json"},
+		{"/usr/bin/test", "!", "-e", "/root/.codex/auth.json"},
+	} {
+		if err := d.authProbe(ctx, id, cmd); err != nil {
+			t.Fatal("real isolation probe failed", cmd[1:])
+		}
+	}
+	probeOutput := func(cmd []string) string {
+		created, err := d.client.ExecCreate(ctx, id, client.ExecCreateOptions{Cmd: cmd, WorkingDir: "/workspace", AttachStdout: true})
+		if err != nil {
+			t.Fatal(err)
+		}
+		stream, err := d.client.ExecAttach(ctx, created.ID, client.ExecAttachOptions{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer stream.Close()
+		if err := stream.Conn.SetReadDeadline(time.Now().Add(dockerOperationTimeout)); err != nil {
+			t.Fatal(err)
+		}
+		var output bytes.Buffer
+		// Demultiplex through a bounded writer; EOF after a complete frame is normal.
+		err = copyCodexProcessStdout(&output, io.LimitReader(stream.Reader, 4096))
+		if err != io.EOF || output.Len() > 4096 {
+			t.Fatal("invalid probe output", err)
+		}
+		if err := d.waitAuthExec(ctx, created.ID); err != nil {
+			t.Fatal(err)
+		}
+		return strings.TrimSpace(output.String())
+	}
+	if got := probeOutput([]string{"/bin/pwd"}); got != "/workspace" {
+		t.Fatal("real cwd", got)
+	}
+	if got := probeOutput([]string{"codex", "--version"}); got != "codex-cli 0.159.2" {
+		t.Fatal("real version", got)
+	}
+	response, err := codexHandshake(session)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(response.UserAgent, "0.159.2") {
+		t.Fatal("handshake version")
+	}
+	if err := session.Close(); err != nil {
+		t.Fatal("real cleanup", err)
+	}
+	if _, err := d.client.ContainerInspect(ctx, id, client.ContainerInspectOptions{}); !errdefs.IsNotFound(err) {
+		t.Fatal("container retained")
+	}
+	t.Log("workspace binding, cwd, Codex 0.159.2, isolated network/mounts, stdio handshake and cleanup verified; no thread/turn/auth/account RPC")
+}
+
 // Only this infrastructure test harness selects the fixed image. No request or
 // environment variable can supply an image, command, authentication or mounts.
 func codexRuntimeSmokeOptions() client.ContainerCreateOptions {

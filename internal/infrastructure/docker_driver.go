@@ -16,9 +16,13 @@ import (
 )
 
 const dockerProbeImage = "alpine:3.23"
+
+// Built locally from testdata/codex-runtime/Dockerfile; never pulled or selected
+// by a request. Missing images fail closed.
+const codexRuntimeImage = "dev-orchestrator-codex-runtime:0.159.2"
 const dockerOperationTimeout = 30 * time.Second
 
-// DockerDriver runs only an internal isolation probe, never Codex or caller commands.
+// DockerDriver runs infrastructure-owned probes and isolated Codex sessions.
 // Authenticated containers stay alive until the fixed probe completes.
 type DockerDriver struct {
 	client         *client.Client
@@ -40,6 +44,30 @@ func NewDockerDriver() (*DockerDriver, error) {
 }
 
 func (d *DockerDriver) Close() error { return d.client.Close() }
+
+func codexSessionCreateOptions(c DockerEnvironmentConfig) client.ContainerCreateOptions {
+	return client.ContainerCreateOptions{
+		Config:     &container.Config{Image: codexRuntimeImage, WorkingDir: c.WorkingDirectory(), Cmd: []string{"/bin/sleep", "300"}},
+		HostConfig: &container.HostConfig{Privileged: false, NetworkMode: "none", Mounts: []mount.Mount{{Type: mount.TypeBind, Source: c.WorkspaceSource(), Target: c.WorkspaceTarget()}}},
+		Platform:   &ocispec.Platform{OS: "linux"},
+	}
+}
+
+func (d *DockerDriver) createCodexContainer(ctx context.Context, c DockerEnvironmentConfig) (string, error) {
+	if d == nil || d.client == nil || c.authTmpfs {
+		return "", errors.New("unauthenticated codex driver required")
+	}
+	if _, err := executionWorkspaceConfig(c.workspace); err != nil {
+		return "", err
+	}
+	ctx, cancel := context.WithTimeout(ctx, dockerOperationTimeout)
+	defer cancel()
+	result, err := d.client.ContainerCreate(ctx, codexSessionCreateOptions(c))
+	if err != nil {
+		return result.ID, errors.New("codex container create failed")
+	}
+	return result.ID, nil
+}
 
 func dockerProbeCommand() []string {
 	return []string{"/bin/sh", "-ec", `test -d /workspace; test "$(pwd)" = /workspace; test ! -e /var/run/docker.sock`}
