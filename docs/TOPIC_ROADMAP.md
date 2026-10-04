@@ -34,7 +34,7 @@ Concluir P0--P5 e validar o ciclo em um projeto piloto.
                                                   comprovados
   --------------------------------------------------------------------------------
 
-P0–P3 concluídos. P4 Executor em andamento; P4.5 é o próximo tópico.
+P0–P3 concluídos. P4 Executor em andamento; P4.6 é o próximo tópico.
 P5 permanece PLANNED. P4 inteiro ainda não está DONE.
 
 ## Estado dos tópicos P4
@@ -45,8 +45,8 @@ P5 permanece PLANNED. P4 inteiro ainda não está DONE.
 | P4.2 Executor Contracts + ExecutorPort | DONE |
 | P4.3 Execution Package + Policy | DONE |
 | P4.4 Codex Provider Adapter | DONE |
-| P4.5 Result Normalization + CODEX_RESULT | NEXT |
-| P4.6 ExecutorSession, Limits + Integrated Validation | PENDING |
+| P4.5 Result Normalization + CODEX_RESULT | DONE |
+| P4.6 ExecutorSession, Limits + Integrated Validation | NEXT |
 
 P4.4: Implementation and deterministic/unauthenticated validation complete.
 Authenticated live execution remains blocked by B-P4-001.
@@ -56,6 +56,18 @@ Review P4.4.13: `P4.4_REVIEW=PASS`; implementação P4.4 fechada após a
 composição concreta de sessão Docker (`5cf7e9829eba91b93528ab9eeedffb767e9e5773`).
 `B-P4-001=OPEN`, `TD-P4-001=OPEN`, `B-P4-002=NOT_NEEDED`.
 Isso não comprova startup/thread/turn autenticados nem execução live de task.
+
+Review P4.5.3: `P4.5_REVIEW=PASS`, `implementation=COMPLETE`,
+`validation=COMPLETE`. Contrato tipado e codec estrito reutilizam
+`domain.Envelope`, preservam ProjectID/TaskID e isolam Outcome de Summary;
+DONE/BLOCKED/FAILED, provider-independent e fail closed. P4.5 não depende
+de live Codex/auth; `B-P4-001=OPEN`, `TD-P4-001=OPEN` e
+`B-P4-002=NOT_NEEDED` permanecem.
+
+P4.6 consolidará lifecycle de ExecutorSession descartável, cancelamento,
+limites e validação integrada, mantendo `ExecutorSession != TaskState`.
+A decisão sobre CANCELLED pertence ao P4.6; execução live autenticada
+continua como blocker separado.
 
 ## Dependência
 
