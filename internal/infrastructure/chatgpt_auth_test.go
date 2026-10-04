@@ -48,7 +48,7 @@ func TestChatGPTAuthIsolationAndCleanup(t *testing.T) {
 	if d.config.WorkspaceSource() != "/trusted/project" || d.config.WorkspaceTarget() != "/workspace" || d.config.WorkingDirectory() != "/workspace" || d.config.Privileged() {
 		t.Fatal("workspace isolation changed")
 	}
-	if !reflect.DeepEqual(d.calls, []string{"create", "auth", "start", "stop", "remove"}) {
+	if !reflect.DeepEqual(d.calls, []string{"create", "start", "auth", "stop", "remove"}) {
 		t.Fatal("invalid lifecycle order")
 	}
 	for _, b := range material {
@@ -99,8 +99,11 @@ func TestChatGPTAuthFailuresAreClosedAndRedacted(t *testing.T) {
 					t.Fatal("source failure reached Docker")
 				}
 			}
-			if stage == "prepare" && !reflect.DeepEqual(d.calls, []string{"create", "auth", "remove"}) {
+			if stage == "prepare" && !reflect.DeepEqual(d.calls, []string{"create", "start", "auth", "remove"}) {
 				t.Fatal("prepare failure started execution or skipped cleanup")
+			}
+			if stage == "start" && !reflect.DeepEqual(d.calls, []string{"create", "start", "remove"}) {
+				t.Fatal("start failure reached auth")
 			}
 			for _, b := range source.material {
 				if b != 0 {

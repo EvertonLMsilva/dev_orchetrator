@@ -1,6 +1,7 @@
 package infrastructure
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -118,7 +119,7 @@ func TestDockerDriverLifecycle(t *testing.T) {
 
 func TestDockerDriverRealIntegration(t *testing.T) {
 	if os.Getenv("DEV_ORCHESTRATOR_DOCKER_INTEGRATION") != "1" {
-		t.Skip("set DEV_ORCHESTRATOR_DOCKER_INTEGRATION=1 to use the real local daemon")
+		t.Skip("opt-in real Docker integration")
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
@@ -128,19 +129,9 @@ func TestDockerDriverRealIntegration(t *testing.T) {
 	}
 	defer driver.Close()
 	info, err := driver.client.Info(ctx, client.InfoOptions{})
-	if err != nil {
-		t.Fatal(err)
+	if err != nil || info.Info.OSType != "linux" {
+		t.Fatal("Linux daemon required")
 	}
-	if info.Info.OSType != "linux" {
-		t.Fatal("Linux Docker daemon required")
-	}
-	var workspace string
-	t.Cleanup(func() {
-		if _, err := os.Stat(workspace); !os.IsNotExist(err) {
-			t.Errorf("temporary workspace not removed: %v", err)
-		}
-	})
-	workspace = t.TempDir()
 	if _, err := driver.client.ImageInspect(ctx, dockerProbeImage); errdefs.IsNotFound(err) {
 		pull, err := driver.client.ImagePull(ctx, dockerProbeImage, client.ImagePullOptions{})
 		if err != nil {
@@ -152,52 +143,129 @@ func TestDockerDriverRealIntegration(t *testing.T) {
 	} else if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(workspace, "workspace-sentinel.txt"), []byte("authorized sentinel"), 0600); err != nil {
+	workspace := os.Getenv("DEV_ORCHESTRATOR_INTEGRATION_WORKSPACE")
+	localWorkspace := os.Getenv("DEV_ORCHESTRATOR_INTEGRATION_LOCAL_WORKSPACE")
+	if workspace == "" {
+		workspace = t.TempDir()
+		localWorkspace = workspace
+	}
+	if localWorkspace == "" {
+		t.Fatal("integration workspace mapping required")
+	}
+	entries, err := os.ReadDir(localWorkspace)
+	if err != nil || len(entries) != 0 {
+		t.Fatal("dedicated empty integration workspace required")
+	}
+	sentinel := filepath.Join(localWorkspace, "workspace-sentinel.txt")
+	if err := os.WriteFile(sentinel, []byte("authorized sentinel"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	if err := NewDockerExecutionEnvironment(driver).RunLifecycle(ctx, ports.RuntimeExecutionRequest{Workspace: workspace}); err != nil {
-		t.Fatal(err)
-	}
-	options := dockerCreateOptions(DockerEnvironmentConfig{workspace: workspace, authTmpfs: true})
-	// The integration workload is fixed here; it is never a runtime request field.
-	options.Config.Cmd = []string{"/bin/sh", "-ec", `test -d /workspace; test "$(pwd)" = /workspace; test "$(cat /workspace/workspace-sentinel.txt)" = "authorized sentinel"; test ! -e /var/run/docker.sock; test -d /run/codex-auth; grep -q ' /run/codex-auth tmpfs ' /proc/mounts; umask 077; printf fake-secret > /run/codex-auth/auth.json; test ! -e /workspace/auth.json`}
-	created, err := driver.client.ContainerCreate(ctx, options)
+	defer os.Remove(sentinel)
+	id, err := driver.Create(ctx, DockerEnvironmentConfig{workspace: workspace, authTmpfs: true})
 	if err != nil {
 		t.Fatal(err)
 	}
 	removed := false
 	defer func() {
-		if !removed {
-			if err := driver.Remove(context.Background(), created.ID); err != nil {
-				t.Error(err)
-			}
+		if removed {
+			return
+		}
+		cleanupCtx, cancel := context.WithTimeout(context.Background(), dockerOperationTimeout)
+		defer cancel()
+		if err := driver.Remove(cleanupCtx, id); err != nil {
+			t.Error("cleanup failed")
 		}
 	}()
-	inspected, err := driver.client.ContainerInspect(ctx, created.ID, client.ContainerInspectOptions{})
-	if err != nil {
+	if err := driver.Start(ctx, id); err != nil {
 		t.Fatal(err)
+	}
+	inspected, err := driver.client.ContainerInspect(ctx, id, client.ContainerInspectOptions{})
+	if err != nil || !inspected.Container.State.Running {
+		t.Fatal("container not running before exec")
 	}
 	c := inspected.Container
-	if c.Config.WorkingDir != "/workspace" || c.HostConfig.Privileged || len(c.HostConfig.Mounts) != 2 || c.HostConfig.Mounts[0].Source != workspace || c.HostConfig.Mounts[0].Target != "/workspace" || c.HostConfig.Mounts[1].Type != mount.TypeTmpfs || c.HostConfig.Mounts[1].Target != "/run/codex-auth" {
-		t.Fatal("unexpected real Docker configuration")
+	for _, value := range c.Config.Env {
+		if strings.Contains(value, "TEST_SECRET_DO_NOT_LEAK") {
+			t.Fatal("secret environment")
+		}
 	}
-	if err := driver.Start(ctx, created.ID); err != nil {
+	if c.HostConfig.Privileged || len(c.HostConfig.Mounts) != 2 || c.HostConfig.Mounts[1].Type != mount.TypeTmpfs || c.HostConfig.Mounts[1].Target != "/run/codex-auth" || c.HostConfig.Mounts[1].TmpfsOptions.Mode != 0700 || !reflect.DeepEqual([]string(c.Config.Cmd), []string{"/bin/sleep", "300"}) {
+		t.Fatal("unsafe authenticated configuration")
+	}
+	if err := driver.authProbe(ctx, id, []string{"/bin/grep", "-q", " /run/codex-auth tmpfs ", "/proc/mounts"}); err != nil {
+		t.Fatal("tmpfs not active")
+	}
+	if err := driver.authProbe(ctx, id, []string{"/bin/grep", "-q", "authorized sentinel", "/workspace/workspace-sentinel.txt"}); err != nil {
+		t.Fatal("workspace sentinel unavailable")
+	}
+	for _, executable := range []string{"/usr/bin/tee", "/bin/chmod"} {
+		if err := driver.authProbe(ctx, id, []string{"/usr/bin/test", "-x", executable}); err != nil {
+			t.Fatal("BLOCKED_FIXED_WRITER: controlled tool unavailable")
+		}
+	}
+	material := []byte("TEST_SECRET_DO_NOT_LEAK")
+	defer clear(material)
+	if err := driver.prepareAuth(ctx, id, "/run/codex-auth/auth.json", material); err != nil {
+		t.Fatal("auth exec failed")
+	}
+	if err := driver.authProbe(ctx, id, []string{"/usr/bin/test", "-s", "/run/codex-auth/auth.json"}); err != nil {
+		t.Fatalf("live tmpfs auth unavailable after exec: %v", err)
+	}
+	modeExec, err := driver.client.ExecCreate(ctx, id, client.ExecCreateOptions{
+		Cmd: []string{"/bin/stat", "-c", "%a", "/run/codex-auth/auth.json"}, AttachStdout: true, TTY: true,
+	})
+	if err != nil {
+		t.Fatal("mode exec create failed")
+	}
+	modeStream, err := driver.client.ExecAttach(ctx, modeExec.ID, client.ExecAttachOptions{TTY: true})
+	if err != nil {
+		t.Fatal("mode exec attach failed")
+	}
+	mode, err := io.ReadAll(io.LimitReader(modeStream.Reader, 32))
+	modeStream.Close()
+	if err != nil || strings.TrimSpace(string(mode)) != "600" {
+		t.Fatal("auth mode is not 0600")
+	}
+	if err := driver.waitAuthExec(ctx, modeExec.ID); err != nil {
+		t.Fatal("mode exec failed")
+	}
+	if err := driver.authProbe(ctx, id, []string{"/usr/bin/test", "!", "-e", "/workspace/auth.json"}); err != nil {
+		t.Fatal("workspace contamination")
+	}
+	if err := driver.Stop(ctx, id); err != nil {
 		t.Fatal(err)
 	}
-	if err := driver.Wait(ctx, created.ID); err != nil {
-		t.Fatal(err)
+	logs, err := driver.client.ContainerLogs(ctx, id, client.ContainerLogsOptions{ShowStdout: true, ShowStderr: true})
+	if err != nil {
+		t.Fatal("logs unavailable")
 	}
-	if err := driver.Remove(ctx, created.ID); err != nil {
-		t.Fatal(err)
+	output, err := io.ReadAll(io.LimitReader(logs, 32768))
+	logs.Close()
+	leaked := bytes.Contains(output, material)
+	clear(output)
+	if err != nil || leaked {
+		t.Fatal("sensitive log output")
+	}
+	if err := driver.Remove(ctx, id); err != nil {
+		t.Fatal("cleanup failed")
 	}
 	removed = true
-	if _, err := driver.client.ContainerInspect(ctx, created.ID, client.ContainerInspectOptions{}); !errdefs.IsNotFound(err) {
-		t.Fatalf("container was not removed: %v", err)
+	if _, err := driver.client.ContainerInspect(ctx, id, client.ContainerInspectOptions{}); !errdefs.IsNotFound(err) {
+		t.Fatal("container retained")
 	}
-	if _, err := os.Stat(filepath.Join(workspace, "auth.json")); !os.IsNotExist(err) {
-		t.Fatal("auth persisted in workspace")
+	secondMaterial := []byte("TEST_SECRET_DO_NOT_LEAK")
+	if err := newAuthenticatedDockerEnvironment(mappedAuthDocker{DockerDriver: driver, workspace: workspace}, fakeAuthSource{material: secondMaterial}).RunLifecycle(ctx, ports.RuntimeExecutionRequest{Workspace: localWorkspace}); err != nil {
+		t.Fatal("authenticated lifecycle failed")
 	}
-	t.Log("real Linux probe passed; sentinel visible; tmpfs present; container removed; temporary workspace cleanup registered")
+	for _, b := range secondMaterial {
+		if b != 0 {
+			t.Fatal("source retained material")
+		}
+	}
+	entries, err = os.ReadDir(localWorkspace)
+	if err != nil || len(entries) != 1 || entries[0].Name() != "workspace-sentinel.txt" {
+		t.Fatal("workspace changed")
+	}
 }
 
 func TestDockerDriverIgnoresCallerEnvironment(t *testing.T) {
@@ -294,4 +362,127 @@ func TestDockerDriverLinuxValidation(t *testing.T) {
 	if waitErr != nil {
 		t.Fatal(waitErr)
 	}
+}
+
+func TestDockerAuthTypedExec(t *testing.T) {
+	for _, failure := range []string{"", "writer", "chmod"} {
+		t.Run("failure="+failure, func(t *testing.T) {
+			var calls []string
+			var removed, workload bool
+			var mu sync.Mutex
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch {
+				case strings.HasSuffix(r.URL.Path, "/containers/create"):
+					w.Header().Set("Content-Type", "application/json")
+					fmt.Fprint(w, `{"Id":"auth-id"}`)
+				case strings.HasSuffix(r.URL.Path, "/containers/auth-id/start"), strings.HasSuffix(r.URL.Path, "/containers/auth-id/stop"):
+					w.WriteHeader(204)
+				case r.Method == http.MethodDelete:
+					mu.Lock()
+					removed = true
+					mu.Unlock()
+					w.WriteHeader(204)
+				case strings.HasSuffix(r.URL.Path, "/exec"):
+					var options client.ExecCreateOptions
+					if err := json.NewDecoder(r.Body).Decode(&options); err != nil {
+						t.Error(err)
+					}
+					mu.Lock()
+					n := len(calls)
+					calls = append(calls, "create")
+					mu.Unlock()
+					expected := []string{"/usr/bin/tee", "/run/codex-auth/auth.json"}
+					id := "writer"
+					if n > 0 {
+						expected = []string{"/bin/chmod", "0600", "/run/codex-auth/auth.json"}
+						id = "chmod"
+					}
+					if n > 1 {
+						expected = []string{"/usr/bin/test", "-s", "/run/codex-auth/auth.json"}
+						id = "workload"
+						mu.Lock()
+						workload = true
+						mu.Unlock()
+					}
+					if !reflect.DeepEqual(options.Cmd, expected) || options.AttachStdout || options.AttachStderr || options.TTY || options.Privileged || len(options.Env) > 0 || options.AttachStdin != (id == "writer") {
+						t.Error("unsafe exec options")
+					}
+					w.Header().Set("Content-Type", "application/json")
+					fmt.Fprintf(w, `{"Id":%q}`, id)
+				case strings.HasSuffix(r.URL.Path, "/writer/start"):
+					io.Copy(io.Discard, r.Body)
+					conn, rw, err := w.(http.Hijacker).Hijack()
+					if err != nil {
+						t.Error(err)
+						return
+					}
+					defer conn.Close()
+					fmt.Fprint(rw, "HTTP/1.1 101 UPGRADED\r\nContent-Type: application/vnd.docker.raw-stream\r\nConnection: Upgrade\r\nUpgrade: tcp\r\n\r\n")
+					rw.Flush()
+					content, err := io.ReadAll(io.LimitReader(rw, 1024))
+					if err != nil || string(content) != "TEST_SECRET_DO_NOT_LEAK" {
+						t.Error("secret not delivered by stdin")
+					}
+					clear(content)
+					// Even unsolicited daemon output is drained without retaining it.
+					fmt.Fprint(rw, "TEST_SECRET_DO_NOT_LEAK")
+					rw.Flush()
+				case strings.HasSuffix(r.URL.Path, "/chmod/start"), strings.HasSuffix(r.URL.Path, "/workload/start"):
+					w.WriteHeader(200)
+				case strings.HasSuffix(r.URL.Path, "/json"):
+					code := 0
+					if strings.Contains(r.URL.Path, "/"+failure+"/") && failure != "" {
+						code = 9
+					}
+					w.Header().Set("Content-Type", "application/json")
+					fmt.Fprintf(w, `{"Running":false,"ExitCode":%d}`, code)
+				default:
+					t.Error("unexpected request (archive forbidden)")
+					w.WriteHeader(500)
+				}
+			}))
+			defer server.Close()
+			sdk, err := client.New(client.WithHost("tcp://"+strings.TrimPrefix(server.URL, "http://")), client.WithAPIVersion("1.56"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer sdk.Close()
+			driver := &DockerDriver{client: sdk}
+			err = newAuthenticatedDockerEnvironment(driver, fakeAuthSource{material: []byte("TEST_SECRET_DO_NOT_LEAK")}).RunLifecycle(context.Background(), ports.RuntimeExecutionRequest{Workspace: "/trusted/project", Objective: "caller cannot select command"})
+			if (err != nil) != (failure != "") || (err != nil && strings.Contains(err.Error(), "TEST_SECRET_DO_NOT_LEAK")) {
+				t.Error("exec failure not closed and redacted")
+			}
+			mu.Lock()
+			count := len(calls)
+			if !removed || workload != (failure == "") {
+				t.Error("failure reached workload or skipped cleanup")
+			}
+			mu.Unlock()
+			want := 3
+			if failure == "chmod" {
+				want = 2
+			}
+			if failure == "writer" {
+				want = 1
+			}
+			if count != want {
+				t.Errorf("exec count=%d want=%d", count, want)
+			}
+			if driver.prepareAuth(context.Background(), "auth-id", "/workspace/auth.json", []byte("fake")) == nil {
+				t.Error("caller destination accepted")
+			}
+		})
+	}
+}
+
+// The Linux test runner and Desktop daemon see the same dedicated host workspace
+// through different paths. Only the test adapter translates that bind source.
+type mappedAuthDocker struct {
+	*DockerDriver
+	workspace string
+}
+
+func (d mappedAuthDocker) Create(ctx context.Context, c DockerEnvironmentConfig) (string, error) {
+	c.workspace = d.workspace
+	return d.DockerDriver.Create(ctx, c)
 }

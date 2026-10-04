@@ -116,14 +116,14 @@ func (e *DockerExecutionEnvironment) RunLifecycle(ctx context.Context, request p
 	if id == "" {
 		return errors.New("docker driver returned an empty container ID")
 	}
+	if err := e.docker.Start(ctx, id); err != nil {
+		return boundaryError("start docker environment", err)
+	}
 	if e.authRequired {
 		if err := e.docker.(chatGPTAuthDocker).prepareAuth(ctx, id, "/run/codex-auth/auth.json", material); err != nil {
 			return boundaryError("prepare chatgpt authentication", err)
 		}
 		clear(material)
-	}
-	if err := e.docker.Start(ctx, id); err != nil {
-		return boundaryError("start docker environment", err)
 	}
 	if err := e.docker.Stop(context.WithoutCancel(ctx), id); err != nil {
 		return boundaryError("stop docker environment", err)

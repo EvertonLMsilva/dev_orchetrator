@@ -9,7 +9,7 @@ type chatGPTAuthSource interface {
 }
 
 // prepareAuth writes a mode 0600 file only to the configured container tmpfs,
-// before Start; no host staging file, bind mount or persistent volume is allowed.
+// after Start, while the container remains running; no host staging file, bind mount or persistent volume is allowed.
 // Implementations must not persist, log or retain material. Remove destroys
 // container storage, including after partial preparation failures.
 type chatGPTAuthDocker interface {
