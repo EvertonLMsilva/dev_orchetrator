@@ -131,7 +131,7 @@ func TestCodexRuntimeRealStartupSmoke(t *testing.T) {
 		t.Fatalf("unexpected version: %q", version.String())
 	}
 	t.Log("reported_version=codex-cli 0.159.2")
-	tr, err := startCodexProcessRuntime(ctx, d, id)
+	tr, response, err := startCodexHandshake(ctx, d, id)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -139,7 +139,9 @@ func TestCodexRuntimeRealStartupSmoke(t *testing.T) {
 	if tr.attachment.input == nil || tr.attachment.output == nil {
 		t.Fatal("stdio not attached")
 	}
-	// Never call Write: even initialize is outside this startup smoke.
+	if response == nil || response.PlatformOS != "linux" {
+		t.Fatal("initialize response missing")
+	}
 	timer := time.NewTimer(2 * time.Second)
 	defer timer.Stop()
 	select {
@@ -167,7 +169,7 @@ func TestCodexRuntimeRealStartupSmoke(t *testing.T) {
 	case <-ctx.Done():
 		t.Fatal("attach pump retained")
 	}
-	t.Log("real_app_server_start=PASS stdio_attach=PASS unauthenticated_start=yes live_rpc_sent=no cleanup=PASS network=none")
+	t.Log("real_app_server_start=PASS initialize_response=received request_id_correlated=yes initialized_sent=yes process_alive_after_handshake=yes unauthenticated_start=yes cleanup=PASS network=none")
 }
 
 func TestDockerDriverLifecycle(t *testing.T) {
