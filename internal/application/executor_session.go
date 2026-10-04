@@ -1,6 +1,7 @@
 package application
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
@@ -61,6 +62,19 @@ func (s ExecutorSession) Fail() (ExecutorSession, error) { return s.transition(E
 // Cancel closes an attempt after context or user cancellation; it adds no outcome.
 func (s ExecutorSession) Cancel() (ExecutorSession, error) {
 	return s.transition(ExecutorSessionCancelled)
+}
+
+// Finish classifies the attempt before its bounded context is released.
+// Context interruption takes precedence over a transport error caused by it.
+// The returned error concerns the transition only; callers retain executionErr.
+func (s ExecutorSession) Finish(ctx context.Context, executionErr error) (ExecutorSession, error) {
+	if ctx.Err() != nil || errors.Is(executionErr, context.Canceled) || errors.Is(executionErr, context.DeadlineExceeded) {
+		return s.Cancel()
+	}
+	if executionErr != nil {
+		return s.Fail()
+	}
+	return s.Complete()
 }
 
 func (s ExecutorSession) transition(next ExecutorSessionState) (ExecutorSession, error) {
