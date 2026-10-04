@@ -18,10 +18,10 @@ Concluir P0--P5 e validar o ciclo em um projeto piloto.
   P3 Planner              DONE                    análise → BOT_COMMAND/CODEX_TASK
                                                   estruturados
 
-  P4 Executor             IN_PROGRESS             CODEX_TASK → Executor →
+  P4 Executor             DONE                    CODEX_TASK → Executor →
                                                   CODEX_RESULT
 
-  P5 Orquestração         PLANNED                 ciclo completo controlado
+  P5 Orquestração         NEXT                    ciclo completo controlado
 
   P6 Git                  FUTURE                  branch/commit/push/PR
                                                   controlados
@@ -34,8 +34,8 @@ Concluir P0--P5 e validar o ciclo em um projeto piloto.
                                                   comprovados
   --------------------------------------------------------------------------------
 
-P0–P3 concluídos. P4 Executor em andamento; P4.6 é o próximo tópico.
-P5 permanece PLANNED. P4 inteiro ainda não está DONE.
+P0–P4 concluídos. P4 implementation DONE; P5 — Orquestração é NEXT.
+Execução live autenticada P4 permanece BLOCKED por B-P4-001.
 
 ## Estado dos tópicos P4
 
@@ -46,7 +46,7 @@ P5 permanece PLANNED. P4 inteiro ainda não está DONE.
 | P4.3 Execution Package + Policy | DONE |
 | P4.4 Codex Provider Adapter | DONE |
 | P4.5 Result Normalization + CODEX_RESULT | DONE |
-| P4.6 ExecutorSession, Limits + Integrated Validation | NEXT |
+| P4.6 ExecutorSession, Limits + Integrated Validation | DONE |
 
 P4.4: Implementation and deterministic/unauthenticated validation complete.
 Authenticated live execution remains blocked by B-P4-001.
@@ -64,10 +64,18 @@ DONE/BLOCKED/FAILED, provider-independent e fail closed. P4.5 não depende
 de live Codex/auth; `B-P4-001=OPEN`, `TD-P4-001=OPEN` e
 `B-P4-002=NOT_NEEDED` permanecem.
 
-P4.6 consolidará lifecycle de ExecutorSession descartável, cancelamento,
-limites e validação integrada, mantendo `ExecutorSession != TaskState`.
-A decisão sobre CANCELLED pertence ao P4.6; execução live autenticada
-continua como blocker separado.
+Review P4.6.4: `P4_REVIEW=PASS`, `previous_finding_resolved=yes`.
+Lifecycle descartável, limites e validação integrada COMPLETE;
+`ExecutorSession != TaskState`, CANCELLED `KEEP_SESSION_ONLY`.
+Histórico P4.6.1–P4.6.3b e evidência detalhada em `docs/tasks/P4.md`.
+P4 implementation DONE; deterministic validation COMPLETE;
+unauthenticated live validation COMPLETE pela evidência anterior aceita;
+authenticated live validation BLOCKED, sem execução autenticada validada.
+`B-P4-001=OPEN`, `TD-P4-001=OPEN`, `B-P4-002=NOT_NEEDED`.
+Validação Linux/Docker: testes completos/focados, vet, build, race,
+`./scripts/validate.sh` e `git diff --check` PASS.
+Sincronização documental P4 concluída conforme `docs/tasks/P4.md`.
+P5 é somente NEXT; nenhuma implementação de Orquestração neste fechamento.
 
 ## Dependência
 
