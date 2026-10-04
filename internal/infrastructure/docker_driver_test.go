@@ -24,6 +24,152 @@ import (
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 )
 
+const codexRuntimeSmokeImage = "dev-orchestrator-codex-runtime:0.159.2"
+
+// Only this infrastructure test harness selects the fixed image. No request or
+// environment variable can supply an image, command, authentication or mounts.
+func codexRuntimeSmokeOptions() client.ContainerCreateOptions {
+	return client.ContainerCreateOptions{
+		Config:     &container.Config{Image: codexRuntimeSmokeImage, WorkingDir: "/workspace", Cmd: []string{"/bin/sleep", "300"}},
+		HostConfig: &container.HostConfig{NetworkMode: "none"},
+		Platform:   &ocispec.Platform{OS: "linux"},
+	}
+}
+
+func TestCodexRuntimeImageContract(t *testing.T) {
+	data, err := os.ReadFile("testdata/codex-runtime/Dockerfile")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "FROM node:22.14.0-bookworm-slim@sha256:1c18d9ab3af4585870b92e4dbc5cac5a0dc77dd13df1a5905cea89fc720eb05b\n\nRUN npm install --global --ignore-scripts @openai/codex@0.159.2\n\nWORKDIR /workspace\nENV CODEX_HOME=/run/codex-process\nRUN mkdir -p /run/codex-process\nCMD [\"/bin/sleep\", \"300\"]\n"
+	if strings.ReplaceAll(string(data), "\r\n", "\n") != want {
+		t.Fatal("runtime build must remain pinned and credential-free")
+	}
+	opts := codexRuntimeSmokeOptions()
+	if opts.Config.Image != codexRuntimeSmokeImage || len(opts.Config.Env) != 0 || opts.HostConfig.Privileged || len(opts.HostConfig.Mounts) != 0 || opts.HostConfig.NetworkMode != "none" || opts.Config.WorkingDir != "/workspace" {
+		t.Fatal("unsafe runtime smoke specification")
+	}
+	opts.Config.Image = "caller-image"
+	if codexRuntimeSmokeOptions().Config.Image != codexRuntimeSmokeImage {
+		t.Fatal("mutable image specification")
+	}
+}
+
+func TestCodexRuntimeRealStartupSmoke(t *testing.T) {
+	if os.Getenv("DEV_ORCHESTRATOR_CODEX_SMOKE") != "1" {
+		t.Skip("opt-in real pinned Codex startup")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	defer cancel()
+	d, err := NewDockerDriver()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.Close()
+	created, err := d.client.ContainerCreate(ctx, codexRuntimeSmokeOptions())
+	if err != nil {
+		t.Fatal(err)
+	}
+	id := created.ID
+	defer func() {
+		cleanup, cancel := context.WithTimeout(context.Background(), dockerOperationTimeout)
+		defer cancel()
+		if _, err := d.client.ContainerInspect(cleanup, id, client.ContainerInspectOptions{}); !errdefs.IsNotFound(err) {
+			if err := d.Remove(cleanup, id); err != nil {
+				t.Error(err)
+			}
+		}
+	}()
+	if err := d.Start(ctx, id); err != nil {
+		t.Fatal(err)
+	}
+	inspected, err := d.client.ContainerInspect(ctx, id, client.ContainerInspectOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := inspected.Container
+	if c.HostConfig.Privileged || len(c.Mounts) != 0 || c.HostConfig.NetworkMode != "none" || c.Config.Image != codexRuntimeSmokeImage {
+		t.Fatal("isolation violated")
+	}
+	for _, env := range c.Config.Env {
+		if strings.HasPrefix(env, "OPENAI_API_KEY=") || strings.HasPrefix(env, "CODEX_API_KEY=") {
+			t.Fatal("credential environment present")
+		}
+	}
+	// Fixed local checks only; no auth source and no app-server RPC.
+	if err := d.authProbe(ctx, id, []string{"/usr/bin/test", "-x", "/usr/local/bin/codex"}); err != nil {
+		t.Fatal("installed binary unavailable")
+	}
+	for _, path := range []string{"/root/.codex/auth.json", "/run/codex-process/auth.json", "/workspace/auth.json", "/var/run/docker.sock"} {
+		if err := d.authProbe(ctx, id, []string{"/usr/bin/test", "!", "-e", path}); err != nil {
+			t.Fatal("unexpected auth/socket file")
+		}
+	}
+	v, err := d.client.ExecCreate(ctx, id, client.ExecCreateOptions{Cmd: []string{"codex", "--version"}, AttachStdout: true, AttachStderr: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	stream, err := d.client.ExecAttach(ctx, v.ID, client.ExecAttachOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Bound hijacked stream lifetime as well as retained version output.
+	stream.Conn.SetReadDeadline(time.Now().Add(dockerOperationTimeout))
+	data, err := io.ReadAll(io.LimitReader(stream.Reader, 4096))
+	stream.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var version bytes.Buffer
+	if err := copyCodexProcessStdout(&version, bytes.NewReader(data)); err != io.EOF {
+		t.Fatal("malformed version stream")
+	}
+	if err := d.waitAuthExec(ctx, v.ID); err != nil {
+		t.Fatal(err)
+	}
+	if strings.TrimSpace(version.String()) != "codex-cli 0.159.2" {
+		t.Fatalf("unexpected version: %q", version.String())
+	}
+	t.Log("reported_version=codex-cli 0.159.2")
+	tr, err := startCodexProcessRuntime(ctx, d, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tr.Close()
+	if tr.attachment.input == nil || tr.attachment.output == nil {
+		t.Fatal("stdio not attached")
+	}
+	// Never call Write: even initialize is outside this startup smoke.
+	timer := time.NewTimer(2 * time.Second)
+	defer timer.Stop()
+	select {
+	case <-tr.closed:
+		t.Fatal("unauthenticated process exited before observation")
+	case <-ctx.Done():
+		t.Fatal(ctx.Err())
+	case <-timer.C:
+	}
+	exec, err := d.client.ExecInspect(ctx, tr.attachment.execID, client.ExecInspectOptions{})
+	if err != nil || !exec.Running {
+		t.Fatal("real app-server is not alive")
+	}
+	if err := d.authProbe(ctx, id, []string{"/usr/bin/test", "!", "-e", "/run/codex-process/auth.json"}); err != nil {
+		t.Fatal("authentication materialized")
+	}
+	if err := tr.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.client.ContainerInspect(ctx, id, client.ContainerInspectOptions{}); !errdefs.IsNotFound(err) {
+		t.Fatal("container retained")
+	}
+	select {
+	case <-tr.pumpDone:
+	case <-ctx.Done():
+		t.Fatal("attach pump retained")
+	}
+	t.Log("real_app_server_start=PASS stdio_attach=PASS unauthenticated_start=yes live_rpc_sent=no cleanup=PASS network=none")
+}
+
 func TestDockerDriverLifecycle(t *testing.T) {
 	for _, stage := range []string{"success", "create", "start", "wait", "exit", "remove"} {
 		t.Run(stage, func(t *testing.T) {
