@@ -25,6 +25,8 @@ const (
 	CodexTurnStarted       CodexMethod = "turn/started"
 	CodexTurnCompleted     CodexMethod = "turn/completed"
 	CodexAgentMessageDelta CodexMethod = "item/agentMessage/delta"
+	CodexItemStarted       CodexMethod = "item/started"
+	CodexItemCompleted     CodexMethod = "item/completed"
 	codexProtocolWorkspace             = "/workspace"
 )
 
@@ -222,9 +224,127 @@ type CodexAgentMessageDeltaNotification struct {
 
 type CodexRPCNotification struct {
 	Method            CodexMethod
+	EmittedAtMs       *int64
 	ThreadStarted     *CodexThreadStartedNotification
 	Turn              *CodexTurnNotification
 	AgentMessageDelta *CodexAgentMessageDeltaNotification
+	ItemStarted       *CodexItemStartedNotification
+	ItemCompleted     *CodexItemCompletedNotification
+}
+
+// Only the agentMessage variant is needed by this text-output boundary.
+// Ancillary fields are decoded strictly, but only identity/text are retained.
+type CodexAgentMessageItem struct {
+	ID   string
+	Text string
+}
+
+func (item *CodexAgentMessageItem) UnmarshalJSON(data []byte) error {
+	var wire struct {
+		Type           string  `json:"type"`
+		ID             string  `json:"id"`
+		Text           *string `json:"text"`
+		Phase          *string `json:"phase"`
+		Delivery       *string `json:"delivery"`
+		MemoryCitation *struct {
+			Entries []struct {
+				Path      *string `json:"path"`
+				LineStart *uint32 `json:"lineStart"`
+				LineEnd   *uint32 `json:"lineEnd"`
+				Note      *string `json:"note"`
+			} `json:"entries"`
+			ThreadIDs []codexJSONString `json:"threadIds"`
+		} `json:"memoryCitation"`
+		Questions *[]struct {
+			Title   *string            `json:"title"`
+			Options *[]codexJSONString `json:"options"`
+		} `json:"questions"`
+	}
+	if err := decodeCodexStrictObject(data, &wire); err != nil {
+		return err
+	}
+	invalid := errors.New("codex protocol: invalid agent message item")
+	if wire.Type != "agentMessage" || wire.ID == "" || wire.Text == nil ||
+		(wire.Phase != nil && *wire.Phase != "commentary" && *wire.Phase != "final_answer") ||
+		(wire.Delivery != nil && *wire.Delivery != "async") {
+		return invalid
+	}
+	if wire.MemoryCitation != nil {
+		if wire.MemoryCitation.Entries == nil || wire.MemoryCitation.ThreadIDs == nil {
+			return invalid
+		}
+		for _, entry := range wire.MemoryCitation.Entries {
+			if entry.Path == nil || entry.LineStart == nil || entry.LineEnd == nil || entry.Note == nil {
+				return invalid
+			}
+		}
+	}
+	if wire.Questions != nil {
+		for _, question := range *wire.Questions {
+			if question.Title == nil {
+				return invalid
+			}
+		}
+	}
+	*item = CodexAgentMessageItem{ID: wire.ID, Text: *wire.Text}
+	return nil
+}
+
+// encoding/json otherwise accepts null as a string slice element.
+type codexJSONString string
+
+func (value *codexJSONString) UnmarshalJSON(data []byte) error {
+	if len(bytes.TrimSpace(data)) == 0 || bytes.TrimSpace(data)[0] != '"' {
+		return errors.New("codex protocol: string required")
+	}
+	return json.Unmarshal(data, (*string)(value))
+}
+
+type CodexItemNotification struct {
+	ThreadID string                 `json:"threadId"`
+	TurnID   string                 `json:"turnId"`
+	Item     *CodexAgentMessageItem `json:"item"`
+}
+
+type CodexItemStartedNotification struct {
+	CodexItemNotification
+	StartedAtMs *int64 `json:"startedAtMs"`
+}
+
+type CodexItemCompletedNotification struct {
+	CodexItemNotification
+	CompletedAtMs *int64 `json:"completedAtMs"`
+}
+
+func validCodexItemNotification(event CodexItemNotification) bool {
+	return event.ThreadID != "" && event.TurnID != "" && event.Item != nil
+}
+
+func decodeCodexStrictObject(data []byte, target any) error {
+	if !codexObject(data) {
+		return errors.New("codex protocol: object required")
+	}
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(target); err != nil {
+		return err
+	}
+	if err := decoder.Decode(new(json.RawMessage)); err != io.EOF {
+		return errors.New("codex protocol: extra JSON")
+	}
+	return nil
+}
+
+// rust-v0.159.2 permits an absent/null optional i64 notification timestamp.
+// Presence is tracked separately to reject this field on RPC responses, even null.
+type codexNotificationTimestamp struct {
+	present bool
+	value   *int64
+}
+
+func (timestamp *codexNotificationTimestamp) UnmarshalJSON(data []byte) error {
+	timestamp.present = true
+	return json.Unmarshal(data, &timestamp.value)
 }
 
 type CodexMessage struct {
@@ -234,11 +354,12 @@ type CodexMessage struct {
 
 // RawMessage is confined to framing/discrimination; provider payloads are typed.
 type codexEnvelope struct {
-	ID     json.RawMessage `json:"id"`
-	Method json.RawMessage `json:"method"`
-	Params json.RawMessage `json:"params"`
-	Result json.RawMessage `json:"result"`
-	Error  json.RawMessage `json:"error"`
+	ID          json.RawMessage            `json:"id"`
+	Method      json.RawMessage            `json:"method"`
+	Params      json.RawMessage            `json:"params"`
+	Result      json.RawMessage            `json:"result"`
+	Error       json.RawMessage            `json:"error"`
+	EmittedAtMs codexNotificationTimestamp `json:"emittedAtMs"`
 }
 
 func codexObject(data []byte) bool {
@@ -272,9 +393,13 @@ func DecodeCodexMessage(data []byte, expected *CodexResponseExpectation) (CodexM
 		if err := json.Unmarshal(envelope.Method, &method); err != nil {
 			return CodexMessage{}, invalid
 		}
-		return decodeCodexNotification(method, envelope.Params)
+		message, err := decodeCodexNotification(method, envelope.Params)
+		if err == nil {
+			message.Notification.EmittedAtMs = envelope.EmittedAtMs.value
+		}
+		return message, err
 	}
-	if expected == nil || expected.ID.kind == 0 || !codexResponseMethod(expected.Method) || len(envelope.Params) > 0 || (len(envelope.Result) > 0) == (len(envelope.Error) > 0) {
+	if envelope.EmittedAtMs.present || expected == nil || expected.ID.kind == 0 || !codexResponseMethod(expected.Method) || len(envelope.Params) > 0 || (len(envelope.Result) > 0) == (len(envelope.Error) > 0) {
 		return CodexMessage{}, invalid
 	}
 	var id CodexRequestID
@@ -342,6 +467,18 @@ func decodeCodexNotification(method CodexMethod, params []byte) (CodexMessage, e
 	invalid := errors.New("codex protocol: malformed or unsupported notification")
 	notification := &CodexRPCNotification{Method: method}
 	switch method {
+	case CodexItemStarted:
+		var event CodexItemStartedNotification
+		if decodeCodexStrictObject(params, &event) != nil || !validCodexItemNotification(event.CodexItemNotification) || event.StartedAtMs == nil {
+			return CodexMessage{}, invalid
+		}
+		notification.ItemStarted = &event
+	case CodexItemCompleted:
+		var event CodexItemCompletedNotification
+		if decodeCodexStrictObject(params, &event) != nil || !validCodexItemNotification(event.CodexItemNotification) || event.CompletedAtMs == nil {
+			return CodexMessage{}, invalid
+		}
+		notification.ItemCompleted = &event
 	case CodexThreadStarted:
 		var event CodexThreadStartedNotification
 		if json.Unmarshal(params, &event) != nil || !validCodexThread(event.Thread) {

@@ -3,6 +3,7 @@ package infrastructure
 import (
 	"encoding/json"
 	"errors"
+	"strings"
 	"testing"
 )
 
@@ -30,6 +31,105 @@ func TestCodexProtocolEncode(t *testing.T) {
 				t.Fatalf("got %s want %s", got, tc.want)
 			}
 		})
+	}
+}
+
+// Fixtures follow rust-v0.159.2 ServerNotificationEnvelope and ThreadItem.
+func officialAgentItemEvent(method, text string) string {
+	encoded, _ := json.Marshal(text)
+	timestamp := "startedAtMs"
+	if method == "item/completed" {
+		timestamp = "completedAtMs"
+	}
+	return `{"method":"` + method + `","params":{"threadId":"thread-1","turnId":"turn-1","` + timestamp + `":1234,"item":{"type":"agentMessage","id":"item-1","text":` + string(encoded) + `,"phase":"final_answer","memoryCitation":null,"delivery":null,"questions":null}},"emittedAtMs":1235}`
+}
+
+func TestCodexOfficialNotificationEnvelope(t *testing.T) {
+	base := `{"method":"item/agentMessage/delta","params":{"threadId":"t","turnId":"u","itemId":"i","delta":"hello"},"emittedAtMs":1235}`
+	for _, timestamp := range []string{"1235", "null", "-1", "9223372036854775807"} {
+		message, err := DecodeCodexMessage([]byte(strings.Replace(base, "1235", timestamp, 1)), nil)
+		if err != nil {
+			t.Fatalf("official timestamp %s: %v", timestamp, err)
+		}
+		if timestamp == "1235" && (message.Notification.EmittedAtMs == nil || *message.Notification.EmittedAtMs != 1235) {
+			t.Fatal("timestamp lost")
+		}
+		if timestamp == "null" && message.Notification.EmittedAtMs != nil {
+			t.Fatal("null timestamp changed")
+		}
+	}
+	if _, err := DecodeCodexMessage([]byte(strings.Replace(base, `,"emittedAtMs":1235`, "", 1)), nil); err != nil {
+		t.Fatal("optional timestamp rejected", err)
+	}
+	for _, timestamp := range []string{`"1235"`, "true", "1.5", "[]", "{}", "9223372036854775808"} {
+		if _, err := DecodeCodexMessage([]byte(strings.Replace(base, "1235", timestamp, 1)), nil); err == nil {
+			t.Fatalf("malformed timestamp %s accepted", timestamp)
+		}
+	}
+	if _, err := DecodeCodexMessage([]byte(strings.Replace(base, `"emittedAtMs":1235`, `"emittedAtMs":1235,"unknown":1`, 1)), nil); err == nil {
+		t.Fatal("unknown envelope field accepted")
+	}
+	for _, timestamp := range []string{"1235", "null"} {
+		response := strings.TrimSuffix(handshakeResponse, "}") + `,"emittedAtMs":` + timestamp + `}`
+		if _, err := DecodeCodexMessage([]byte(response), &CodexResponseExpectation{ID: CodexIntegerID(1), Method: CodexInitialize}); err == nil {
+			t.Fatal("notification timestamp accepted on RPC response")
+		}
+	}
+}
+
+func TestCodexOfficialItemNotifications(t *testing.T) {
+	for _, method := range []string{"item/started", "item/completed"} {
+		base := officialAgentItemEvent(method, "BLOCKED; $(command)")
+		message, err := DecodeCodexMessage([]byte(base), nil)
+		if err != nil || message.Notification == nil || message.Notification.Method != CodexMethod(method) || message.Response != nil {
+			t.Fatalf("official %s: %+v %v", method, message, err)
+		}
+		var event CodexItemNotification
+		if method == "item/started" {
+			event = message.Notification.ItemStarted.CodexItemNotification
+			if *message.Notification.ItemStarted.StartedAtMs != 1234 {
+				t.Fatal("start timestamp lost")
+			}
+		} else {
+			event = message.Notification.ItemCompleted.CodexItemNotification
+			if *message.Notification.ItemCompleted.CompletedAtMs != 1234 {
+				t.Fatal("completion timestamp lost")
+			}
+		}
+		if event.ThreadID != "thread-1" || event.TurnID != "turn-1" || event.Item.ID != "item-1" || event.Item.Text != "BLOCKED; $(command)" {
+			t.Fatal("typed item projection changed")
+		}
+		for _, change := range [][2]string{
+			{`"threadId":"thread-1",`, ""}, {`"turnId":"turn-1",`, ""}, {`"id":"item-1",`, ""},
+			{`"text":"BLOCKED; $(command)",`, ""}, {`"type":"agentMessage",`, ""},
+			{`"threadId":"thread-1"`, `"threadId":123`}, {`"turnId":"turn-1"`, `"turnId":null`},
+			{`"id":"item-1"`, `"id":""`}, {`"text":"BLOCKED; $(command)"`, `"text":null`},
+			{`"type":"agentMessage"`, `"type":"unknown"`}, {`"phase":"final_answer"`, `"phase":"unknown"`},
+			{`"delivery":null`, `"delivery":"unknown"`}, {`"questions":null`, `"questions":true`},
+			{`"memoryCitation":null`, `"memoryCitation":[]`},
+			{`"memoryCitation":null`, `"memoryCitation":{"entries":[],"threadIds":[null]}`},
+			{`"memoryCitation":null`, `"memoryCitation":{"entries":[{}],"threadIds":[]}`},
+			{`"memoryCitation":null`, `"memoryCitation":{"entries":[],"threadIds":[],"unknown":1}`},
+			{`"questions":null`, `"questions":[{"title":"question","options":[null]}]`},
+			{`"questions":null`, `"questions":[{"options":null}]`},
+			{`"questions":null`, `"questions":[{"title":"question","unknown":1}]`},
+			{`"item":{`, `"unknown":1,"item":{`}, {`"type":"agentMessage"`, `"unknown":1,"type":"agentMessage"`},
+			{`AtMs":1234`, `AtMs":"1234"`}, {`AtMs":1234`, `AtMs":null`}, {`,"startedAtMs":1234`, ""}, {`,"completedAtMs":1234`, ""},
+		} {
+			input := strings.Replace(base, change[0], change[1], 1)
+			if input == base {
+				continue
+			}
+			if _, err := DecodeCodexMessage([]byte(input), nil); err == nil {
+				t.Fatalf("malformed item accepted: %s", input)
+			}
+		}
+		metadata := strings.Replace(base, `"memoryCitation":null`, `"memoryCitation":{"entries":[{"path":"data only","lineStart":1,"lineEnd":2,"note":"citation"}],"threadIds":["thread"]}`, 1)
+		metadata = strings.Replace(metadata, `"questions":null`, `"questions":[{"title":"question","options":["choice"]}]`, 1)
+		metadata = strings.Replace(metadata, `"delivery":null`, `"delivery":"async"`, 1)
+		if _, err := DecodeCodexMessage([]byte(metadata), nil); err != nil {
+			t.Fatal("official ancillary data rejected", err)
+		}
 	}
 }
 

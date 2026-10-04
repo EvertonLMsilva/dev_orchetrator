@@ -129,3 +129,57 @@ func TestCodexTurnFailedDetail(t *testing.T) {
 		t.Fatal("lost terminal failure data")
 	}
 }
+
+func TestCodexTurnOfficialItemSequence(t *testing.T) {
+	started := officialAgentItemEvent("item/started", "")
+	completed := officialAgentItemEvent("item/completed", "BLOCKED; $(command)")
+	timestamped := func(event string) string { return strings.TrimSuffix(event, "}") + `,"emittedAtMs":1235}` }
+	for _, tc := range []struct {
+		name   string
+		events []string
+		fail   bool
+	}{
+		{"complete", []string{turnResponse, started, timestamped(turnDelta("BLOCKED; $(command)")), completed, timestamped(turnEvent("completed"))}, false},
+		{"started_not_terminal", []string{turnResponse, started}, true},
+		{"completed_not_terminal", []string{turnResponse, started, completed}, true},
+		{"wrong_thread_started", []string{turnResponse, strings.Replace(started, "thread-1", "other", 1)}, true},
+		{"wrong_turn_started", []string{turnResponse, strings.Replace(started, "turn-1", "other", 1)}, true},
+		{"wrong_thread_completed", []string{turnResponse, started, strings.Replace(completed, "thread-1", "other", 1)}, true},
+		{"wrong_turn_completed", []string{turnResponse, started, strings.Replace(completed, "turn-1", "other", 1)}, true},
+		{"wrong_item_completed", []string{turnResponse, started, strings.Replace(completed, "item-1", "other", 1)}, true},
+		{"wrong_item_delta", []string{turnResponse, started, strings.Replace(turnDelta("x"), "item-1", "other", 1)}, true},
+		{"completed_output_limit", []string{turnResponse, started, officialAgentItemEvent("item/completed", strings.Repeat("x", codexTurnTextLimit+1)), timestamped(turnEvent("completed"))}, true},
+		{"before_response", []string{started, turnResponse}, true},
+		{"unknown_notification", []string{turnResponse, started, `{"method":"unknown","params":{},"emittedAtMs":1235}`}, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := &threadFake{messages: tc.events}
+			got, err := turnThread(t, f).StartTurn("task")
+			if (err != nil) != tc.fail {
+				t.Fatalf("%+v %v", got, err)
+			}
+			if !tc.fail && (got.Status != CodexTurnCompletedStatus || got.Text != "BLOCKED; $(command)" || len(f.messages) != 0) {
+				t.Fatalf("result: %+v", got)
+			}
+		})
+	}
+}
+
+func TestCodexTurnItemOutputBoundAndNoDuplication(t *testing.T) {
+	for _, overflow := range []bool{false, true} {
+		text := strings.Repeat("x", codexTurnTextLimit)
+		events := []string{turnResponse, officialAgentItemEvent("item/started", ""), turnDelta(text), officialAgentItemEvent("item/completed", text)}
+		if overflow {
+			events = append(events, strings.Replace(officialAgentItemEvent("item/started", ""), "item-1", "item-2", 1), strings.Replace(turnDelta("x"), "item-1", "item-2", 1))
+		}
+		events = append(events, turnEvent("completed"))
+		got, err := turnThread(t, &threadFake{messages: events}).StartTurn("task")
+		if overflow {
+			if err == nil || got != (CodexTurnResult{}) {
+				t.Fatal("cumulative bound bypassed")
+			}
+		} else if err != nil || got.Text != text || got.Status != CodexTurnCompletedStatus {
+			t.Fatal("completed snapshot duplicated output", err)
+		}
+	}
+}
