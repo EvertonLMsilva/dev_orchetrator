@@ -18,7 +18,7 @@ Concluir P0--P5 e validar o ciclo em um projeto piloto.
   P3 Planner              DONE                    análise → BOT_COMMAND/CODEX_TASK
                                                   estruturados
 
-  P4 Executor             PLANNED                 CODEX_TASK → Executor →
+  P4 Executor             IN_PROGRESS             CODEX_TASK → Executor →
                                                   CODEX_RESULT
 
   P5 Orquestração         PLANNED                 ciclo completo controlado
@@ -34,7 +34,28 @@ Concluir P0--P5 e validar o ciclo em um projeto piloto.
                                                   comprovados
   --------------------------------------------------------------------------------
 
-P0–P3 concluídos. P4 Executor é o próximo tópico; P5 permanece PLANNED.
+P0–P3 concluídos. P4 Executor em andamento; P4.5 é o próximo tópico.
+P5 permanece PLANNED. P4 inteiro ainda não está DONE.
+
+## Estado dos tópicos P4
+
+| Tópico | Estado |
+| --- | --- |
+| P4.1 Official Codex Integration Discovery + ADR | DONE |
+| P4.2 Executor Contracts + ExecutorPort | DONE |
+| P4.3 Execution Package + Policy | DONE |
+| P4.4 Codex Provider Adapter | DONE |
+| P4.5 Result Normalization + CODEX_RESULT | NEXT |
+| P4.6 ExecutorSession, Limits + Integrated Validation | PENDING |
+
+P4.4: Implementation and deterministic/unauthenticated validation complete.
+Authenticated live execution remains blocked by B-P4-001.
+TD-P4-001 remains open.
+
+Review P4.4.13: `P4.4_REVIEW=PASS`; implementação P4.4 fechada após a
+composição concreta de sessão Docker (`5cf7e9829eba91b93528ab9eeedffb767e9e5773`).
+`B-P4-001=OPEN`, `TD-P4-001=OPEN`, `B-P4-002=NOT_NEEDED`.
+Isso não comprova startup/thread/turn autenticados nem execução live de task.
 
 ## Dependência
 
