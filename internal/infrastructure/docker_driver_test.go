@@ -482,6 +482,143 @@ type mappedAuthDocker struct {
 	workspace string
 }
 
+func TestDockerCodexProcessAttachAndFailureCleanup(t *testing.T) {
+	for _, stage := range []string{"", "inspect", "create", "attach", "stop", "exit", "remove", "authenticated"} {
+		t.Run(stage, func(t *testing.T) {
+			var mu sync.Mutex
+			var calls []string
+			stdin := make(chan string, 1)
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				mu.Lock()
+				calls = append(calls, r.Method+" "+r.URL.Path)
+				mu.Unlock()
+				w.Header().Set("Content-Type", "application/json")
+				switch {
+				case strings.HasSuffix(r.URL.Path, "/containers/container/json"):
+					if stage == "inspect" {
+						w.WriteHeader(500)
+						fmt.Fprint(w, `{"message":"TEST_SECRET_DO_NOT_LEAK"}`)
+						return
+					}
+					fmt.Fprint(w, `{"State":{"Running":true}}`)
+				case strings.HasSuffix(r.URL.Path, "/containers/container/exec"):
+					var options client.ExecCreateOptions
+					if json.NewDecoder(r.Body).Decode(&options) != nil || !reflect.DeepEqual(options, codexProcessCreateOptions()) {
+						t.Error("unsafe process spec")
+					}
+					if stage == "create" {
+						w.WriteHeader(500)
+						fmt.Fprint(w, `{"message":"TEST_SECRET_DO_NOT_LEAK"}`)
+						return
+					}
+					fmt.Fprint(w, `{"Id":"codex-exec"}`)
+				case strings.HasSuffix(r.URL.Path, "/exec/codex-exec/start"):
+					var options client.ExecStartOptions
+					if json.NewDecoder(r.Body).Decode(&options) != nil || options.Detach || options.TTY {
+						t.Error("unsafe attach/start")
+					}
+					if stage == "attach" {
+						w.WriteHeader(500)
+						fmt.Fprint(w, `{"message":"TEST_SECRET_DO_NOT_LEAK"}`)
+						return
+					}
+					conn, rw, err := w.(http.Hijacker).Hijack()
+					if err != nil {
+						t.Error(err)
+						return
+					}
+					defer conn.Close()
+					conn.SetDeadline(time.Now().Add(5 * time.Second))
+					fmt.Fprint(rw, "HTTP/1.1 101 UPGRADED\r\nContent-Type: application/vnd.docker.raw-stream\r\nConnection: Upgrade\r\nUpgrade: tcp\r\n\r\n")
+					rw.Flush()
+					line, err := rw.ReadString('\n')
+					if err != nil {
+						t.Error(err)
+						return
+					}
+					stdin <- line
+					rw.Write(codexDockerFrame(2, "TEST_SECRET_DO_NOT_LEAK\n"))
+					rw.Write(codexDockerFrame(1, "{\"method\":\"fake\"}\n"))
+					rw.Flush()
+					io.Copy(io.Discard, rw)
+				case strings.HasSuffix(r.URL.Path, "/containers/container/stop"):
+					if stage == "stop" {
+						w.WriteHeader(500)
+						fmt.Fprint(w, `{"message":"TEST_SECRET_DO_NOT_LEAK"}`)
+						return
+					}
+					w.WriteHeader(204)
+				case strings.HasSuffix(r.URL.Path, "/exec/codex-exec/json"):
+					if stage == "exit" {
+						w.WriteHeader(500)
+						fmt.Fprint(w, `{"message":"TEST_SECRET_DO_NOT_LEAK"}`)
+						return
+					}
+					fmt.Fprint(w, `{"Running":false,"ExitCode":0}`)
+				case r.Method == http.MethodDelete && strings.HasSuffix(r.URL.Path, "/containers/container"):
+					if stage == "remove" {
+						w.WriteHeader(500)
+						fmt.Fprint(w, `{"message":"TEST_SECRET_DO_NOT_LEAK"}`)
+						return
+					}
+					w.WriteHeader(204)
+				default:
+					t.Error("unexpected SDK operation")
+					w.WriteHeader(500)
+				}
+			}))
+			defer server.Close()
+			sdk, err := client.New(client.WithHost("tcp://"+strings.TrimPrefix(server.URL, "http://")), client.WithAPIVersion("1.56"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer sdk.Close()
+			d := &DockerDriver{client: sdk}
+			if stage == "authenticated" {
+				d.authContainers.Store("container", true)
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			tr, err := startCodexProcessRuntime(ctx, d, "container")
+			startFailure := stage == "inspect" || stage == "create" || stage == "attach" || stage == "authenticated"
+			if (err != nil) != startFailure || err != nil && strings.Contains(err.Error(), "TEST_SECRET_DO_NOT_LEAK") {
+				t.Fatalf("start: %v", err)
+			}
+			if tr != nil {
+				if err := tr.Write([]byte(`{"method":"fake"}`)); err != nil {
+					t.Fatal(err)
+				}
+				message, err := tr.Read()
+				if err != nil || string(message) != `{"method":"fake"}` {
+					t.Fatalf("SDK stdout: %s %v", message, err)
+				}
+				if got := <-stdin; got != "{\"method\":\"fake\"}\n" {
+					t.Fatalf("SDK stdin: %q", got)
+				}
+				err = tr.Close()
+				cleanupFailure := stage == "stop" || stage == "exit" || stage == "remove"
+				if (err != nil) != cleanupFailure || err != nil && strings.Contains(err.Error(), "TEST_SECRET_DO_NOT_LEAK") {
+					t.Fatalf("close: %v", err)
+				}
+			}
+			mu.Lock()
+			defer mu.Unlock()
+			if len(calls) == 0 || !strings.Contains(calls[len(calls)-1], "DELETE ") {
+				t.Fatalf("no cleanup: %v", calls)
+			}
+			starts := 0
+			for _, call := range calls {
+				if strings.HasSuffix(call, "/exec/codex-exec/start") {
+					starts++
+				}
+			}
+			if starts > 1 {
+				t.Fatal("process started twice")
+			}
+		})
+	}
+}
+
 func (d mappedAuthDocker) Create(ctx context.Context, c DockerEnvironmentConfig) (string, error) {
 	c.workspace = d.workspace
 	return d.DockerDriver.Create(ctx, c)

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"sync"
 	"time"
 
@@ -205,4 +206,59 @@ func (d *DockerDriver) Remove(ctx context.Context, id string) error {
 	}
 	d.authContainers.Delete(id)
 	return nil
+}
+
+// codexProcessCreateOptions is a fresh, fixed specification for the unauthenticated
+// runtime. Its private CODEX_HOME is separate from P4.4.5's auth materialization.
+func codexProcessCreateOptions() client.ExecCreateOptions {
+	return client.ExecCreateOptions{
+		Cmd:        []string{"codex", "app-server", "--listen", "stdio://"},
+		WorkingDir: "/workspace", Env: []string{"CODEX_HOME=/run/codex-process"},
+		AttachStdin: true, AttachStdout: true, AttachStderr: true,
+	}
+}
+
+var _ codexProcessDocker = (*DockerDriver)(nil)
+
+func (d *DockerDriver) startCodexProcess(ctx context.Context, containerID string) (codexProcessAttachment, error) {
+	ctx, cancel := context.WithTimeout(ctx, dockerOperationTimeout)
+	defer cancel()
+	if _, authenticated := d.authContainers.Load(containerID); authenticated {
+		return codexProcessAttachment{}, errors.New("authenticated app-server startup is out of scope")
+	}
+	inspected, err := d.client.ContainerInspect(ctx, containerID, client.ContainerInspectOptions{})
+	if err != nil || inspected.Container.State == nil || !inspected.Container.State.Running {
+		return codexProcessAttachment{}, errors.New("codex process requires running container")
+	}
+	created, err := d.client.ExecCreate(ctx, containerID, codexProcessCreateOptions())
+	if err != nil {
+		return codexProcessAttachment{}, errors.New("codex process exec create failed")
+	}
+	// ExecAttach performs POST /exec/{id}/start with an HTTP hijack. It is the
+	// SDK equivalent of attaching and starting, not a detached ExecStart call.
+	attached, err := d.client.ExecAttach(ctx, created.ID, client.ExecAttachOptions{})
+	if err != nil {
+		return codexProcessAttachment{}, errors.New("codex process exec attach/start failed")
+	}
+	return codexProcessAttachment{execID: created.ID, input: codexProcessStdin{attached.Conn}, output: attached.Reader, close: attached.Close, closeWrite: attached.CloseWrite}, nil
+}
+
+// Only the dedicated container is stopped; no shell or caller-selected signal.
+func (d *DockerDriver) stopCodexProcess(ctx context.Context, containerID, execID string) error {
+	seconds := 1
+	_, stopErr := d.client.ContainerStop(ctx, containerID, client.ContainerStopOptions{Timeout: &seconds})
+	inspected, inspectErr := d.client.ExecInspect(ctx, execID, client.ExecInspectOptions{})
+	if stopErr != nil || inspectErr != nil || inspected.Running {
+		return errors.New("codex process stop/inspect failed")
+	}
+	return nil
+}
+
+type codexProcessStdin struct{ conn net.Conn }
+
+func (s codexProcessStdin) Write(data []byte) (int, error) {
+	if err := s.conn.SetWriteDeadline(time.Now().Add(dockerOperationTimeout)); err != nil {
+		return 0, errors.New("codex process write deadline failed")
+	}
+	return s.conn.Write(data)
 }
