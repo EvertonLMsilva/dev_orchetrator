@@ -15,6 +15,16 @@ import (
 // caller-controlled command, additional mounts or privilege settings.
 type DockerEnvironmentConfig struct {
 	workspace string
+	authTmpfs bool
+}
+
+// AuthTmpfsTarget is container-only tmpfs (mode 0700), never a bind mount or
+// persistent volume. The driver must create it before preparing authentication.
+func (c DockerEnvironmentConfig) AuthTmpfsTarget() string {
+	if c.authTmpfs {
+		return "/run/codex-auth"
+	}
+	return ""
 }
 
 func (c DockerEnvironmentConfig) WorkspaceSource() string { return c.workspace }
@@ -35,7 +45,9 @@ type DockerLifecycle interface {
 }
 
 type DockerExecutionEnvironment struct {
-	docker DockerLifecycle
+	docker       DockerLifecycle
+	authRequired bool
+	authSource   chatGPTAuthSource
 }
 
 func NewDockerExecutionEnvironment(docker DockerLifecycle) *DockerExecutionEnvironment {
@@ -63,26 +75,58 @@ func (e *DockerExecutionEnvironment) RunLifecycle(ctx context.Context, request p
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	id, err := e.docker.Create(ctx, DockerEnvironmentConfig{workspace: workspace})
+	// Auth errors, including driver errors after injection, are opaque: wrapping
+	// an underlying error could expose material supplied by a source or driver.
+	boundaryError := func(operation string, err error) error {
+		if e.authRequired {
+			return errors.New(operation + " failed")
+		}
+		return fmt.Errorf("%s: %w", operation, err)
+	}
+	var material []byte
+	if e.authRequired {
+		if e.authSource == nil {
+			return errors.New("chatgpt authentication source required")
+		}
+		var err error
+		material, err = e.authSource.obtain(ctx)
+		defer func() { clear(material) }()
+		if err != nil || len(material) == 0 {
+			return errors.New("chatgpt authentication unavailable")
+		}
+		if _, ok := e.docker.(chatGPTAuthDocker); !ok {
+			return errors.New("chatgpt authentication preparation required")
+		}
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+	}
+	id, err := e.docker.Create(ctx, DockerEnvironmentConfig{workspace: workspace, authTmpfs: e.authRequired})
 	if id != "" {
 		// Cleanup must remain possible after cancellation or any later failure.
 		defer func() {
 			if err := e.docker.Remove(context.WithoutCancel(ctx), id); err != nil {
-				resultErr = errors.Join(resultErr, fmt.Errorf("remove docker environment: %w", err))
+				resultErr = errors.Join(resultErr, boundaryError("remove docker environment", err))
 			}
 		}()
 	}
 	if err != nil {
-		return fmt.Errorf("create docker environment: %w", err)
+		return boundaryError("create docker environment", err)
 	}
 	if id == "" {
 		return errors.New("docker driver returned an empty container ID")
 	}
+	if e.authRequired {
+		if err := e.docker.(chatGPTAuthDocker).prepareAuth(ctx, id, "/run/codex-auth/auth.json", material); err != nil {
+			return boundaryError("prepare chatgpt authentication", err)
+		}
+		clear(material)
+	}
 	if err := e.docker.Start(ctx, id); err != nil {
-		return fmt.Errorf("start docker environment: %w", err)
+		return boundaryError("start docker environment", err)
 	}
 	if err := e.docker.Stop(context.WithoutCancel(ctx), id); err != nil {
-		return fmt.Errorf("stop docker environment: %w", err)
+		return boundaryError("stop docker environment", err)
 	}
 	return ctx.Err()
 }

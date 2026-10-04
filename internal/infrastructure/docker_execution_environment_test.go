@@ -67,10 +67,10 @@ func TestDockerEnvironmentIsolationAndSuccessCleanup(t *testing.T) {
 	if d.config.WorkspaceSource() != "/trusted/project" || d.config.WorkspaceTarget() != "/workspace" || d.config.WorkingDirectory() != "/workspace" || d.config.Privileged() {
 		t.Fatalf("unsafe configuration: %+v", d.config)
 	}
-	// Configuration has one private source, with no fields for additional mounts,
+	// Configuration has a private workspace source and tmpfs flag, with no fields for additional mounts,
 	// commands or privileges. Its exported API exposes only read access.
 	typ := reflect.TypeOf(d.config)
-	if typ.NumField() != 1 || typ.Field(0).IsExported() {
+	if typ.NumField() != 2 || typ.Field(0).IsExported() || typ.Field(1).IsExported() || typ.Field(1).Type.Kind() != reflect.Bool || d.config.AuthTmpfsTarget() != "" {
 		t.Fatal("configuration exposes caller controls")
 	}
 	if !reflect.DeepEqual(d.calls, []string{"create", "start", "stop", "remove"}) {
