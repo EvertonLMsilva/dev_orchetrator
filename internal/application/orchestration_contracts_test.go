@@ -16,9 +16,10 @@ func roundFixture(t *testing.T) OrchestrationInput {
 		t.Fatal(err)
 	}
 	return OrchestrationInput{
-		PlannerRequest: ports.PlannerRequest{ProjectID: "project", TaskID: "task"},
-		Context:        PlannerContext{Project: domain.Project{ID: "project"}, CurrentTask: domain.Task{ID: "task", ProjectID: "project", Status: domain.TaskStatusAnalyzing}},
-		Evidence:       []PlannerEvidence{evidence},
+		ProjectID: "project",
+		TaskID:    "task",
+		Context:   PlannerContext{Project: domain.Project{ID: "project"}, CurrentTask: domain.Task{ID: "task", ProjectID: "project", Status: domain.TaskStatusAnalyzing}},
+		Evidence:  []PlannerEvidence{evidence},
 	}
 }
 

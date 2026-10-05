@@ -3,6 +3,7 @@ package application
 import (
 	"errors"
 
+	"dev-orchestrator/internal/domain"
 	"dev-orchestrator/internal/ports"
 )
 
@@ -12,15 +13,17 @@ var ErrInvalidOrchestrationContext = errors.New("orchestration context does not 
 // planner for one round. Context comes from ContextBuilder; optional Evidence
 // comes from ConsumePlannerEvidence, after validating the original expectation.
 // Validate rechecks structure and round identity, not transport provenance.
-// This contract does not invoke Planner or change its existing port.
+// This contract does not invoke Planner.
 type OrchestrationInput struct {
-	ports.PlannerRequest
-	Context  PlannerContext
-	Evidence []PlannerEvidence
+	ProjectID domain.ProjectID
+	TaskID    domain.TaskID
+	Context   PlannerContext
+	Evidence  []PlannerEvidence
 }
 
 func (r OrchestrationInput) Validate() error {
-	if err := r.PlannerRequest.Validate(); err != nil {
+	request := ports.PlannerRequest{ProjectID: r.ProjectID, TaskID: r.TaskID, Context: r.Context, Evidence: r.Evidence}
+	if err := request.Validate(); err != nil {
 		return err
 	}
 	if r.Context.Project.ID != r.ProjectID || r.Context.CurrentTask.ID != r.TaskID || r.Context.CurrentTask.ProjectID != r.ProjectID {

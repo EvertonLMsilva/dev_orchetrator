@@ -17,10 +17,7 @@ var (
 )
 
 // PlannerContext contains only the current canonical project and task.
-type PlannerContext struct {
-	Project     domain.Project
-	CurrentTask domain.Task
-}
+type PlannerContext = ports.PlannerContext
 
 // ContextBuilder reads canonical state without changing it or invoking a planner.
 type ContextBuilder struct {
