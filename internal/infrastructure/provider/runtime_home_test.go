@@ -61,6 +61,47 @@ func TestRuntimeHomeBootstrapFreshSession(t *testing.T) {
 	}
 }
 
+func TestRuntimeHomeAuthenticatedPluginsDisabled(t *testing.T) {
+	// A caller's home is not a configuration source for the private P6 home.
+	external := t.TempDir()
+	externalConfig := []byte("[features]\nplugins = true\n")
+	if err := os.WriteFile(filepath.Join(external, "config.toml"), externalConfig, 0600); err != nil {
+		t.Fatal("fixture preparation failed")
+	}
+	t.Setenv("CODEX_HOME", external)
+	for _, bootstrap := range []bool{true, false} {
+		s := testRuntimeStore(t)
+		var lease *RuntimeHomeLease
+		var config []byte
+		var err error
+		if bootstrap {
+			m := &bootstrapMemoryHome{}
+			lease, err = s.Bootstrap(context.Background(), m)
+			config = m.config
+		} else {
+			if err = s.StoreSession(context.Background(), []byte(runtimeAuth)); err != nil {
+				t.Fatal("session fixture failed")
+			}
+			m := &memoryRuntimeHome{}
+			lease, err = s.Materialize(context.Background(), m)
+			config = m.config
+		}
+		if err != nil {
+			t.Fatal("materialization failed")
+		}
+		if lease.Abort(context.Background()) != nil {
+			t.Fatal("cleanup failed")
+		}
+		if string(config) != "cli_auth_credentials_store = \"file\"\nforced_login_method = \"chatgpt\"\n[features]\nplugins = false\n" {
+			t.Fatal("authenticated runtime did not force plugins off")
+		}
+	}
+	unchanged, err := os.ReadFile(filepath.Join(external, "config.toml"))
+	if err != nil || !bytes.Equal(unchanged, externalConfig) {
+		t.Fatal("unrelated configuration changed")
+	}
+}
+
 func TestRuntimeHomeRejectsUnsafeContainerCapture(t *testing.T) {
 	for _, kind := range []string{"symlink", "hardlink", "directory", "outside", "extra", "permissions", "oversized"} {
 		t.Run(kind, func(t *testing.T) {

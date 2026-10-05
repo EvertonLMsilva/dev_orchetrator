@@ -18,7 +18,7 @@ import (
 	"dev-orchestrator/internal/infrastructure"
 )
 
-const runtimeHomeConfig = "cli_auth_credentials_store = \"file\"\nforced_login_method = \"chatgpt\"\n"
+const runtimeHomeConfig = "cli_auth_credentials_store = \"file\"\nforced_login_method = \"chatgpt\"\n[features]\nplugins = false\n"
 const runtimeAuthLimit = 1024 * 1024
 const runtimeStorePath = "/var/lib/dev-orchestrator/runtime-auth"
 
