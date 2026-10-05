@@ -79,17 +79,22 @@ func TestOrchestratorEvidenceCycle(t *testing.T) {
 		for _, agentErr := range []error{nil, ErrPolicyBlocked, ErrPolicyRequiresApproval, errors.New("execution failure")} {
 			t.Run(string(second)+"/"+fmtError(agentErr), func(t *testing.T) {
 				o, input, p, transport, agent, tasks := cycleFixture(t, second)
+				if second == ports.PlannerDecisionPrepareExecutor {
+					configured, _, _, _ := executorFixture(t)
+					o.executorCycle = configured.executorCycle
+					o.executorCycle.Tasks = tasks
+				}
 				agent.err = agentErr
+				canonical, err := o.builder.Build(context.Background(), input.ProjectID, input.TaskID)
+				if err != nil {
+					t.Fatal(err)
+				}
 				out, err := o.Run(context.Background(), input)
 				if err != nil {
 					t.Fatal(err)
 				}
 				if out.Decision != p.decisions[1] || len(p.calls) != 2 || transport.calls != 1 || agent.calls != 1 {
 					t.Fatalf("wrong round limits/output: %+v", out)
-				}
-				canonical, err := o.builder.Build(context.Background(), input.ProjectID, input.TaskID)
-				if err != nil {
-					t.Fatal(err)
 				}
 				if !reflect.DeepEqual(p.calls[0].Context, canonical) || len(p.calls[0].Evidence) != 0 || !reflect.DeepEqual(p.calls[1].Context, canonical) || len(p.calls[1].Evidence) != 1 {
 					t.Fatal("canonical context or evidence missing")
@@ -112,7 +117,11 @@ func TestOrchestratorEvidenceCycle(t *testing.T) {
 					t.Fatal("operational status changed")
 				}
 				stored, _, err := tasks.FindByID(context.Background(), input.TaskID)
-				if err != nil || stored != canonical.CurrentTask {
+				wantTask := canonical.CurrentTask
+				if second == ports.PlannerDecisionPrepareExecutor {
+					wantTask.Status = domain.TaskStatusDone
+				}
+				if err != nil || stored != wantTask {
 					t.Fatal("task mutated")
 				}
 			})
@@ -211,6 +220,13 @@ func TestOrchestratorReturnsInitialNonEvidenceDecision(t *testing.T) {
 	for _, kind := range []ports.PlannerDecisionType{ports.PlannerDecisionBlock, ports.PlannerDecisionPrepareExecutor} {
 		o, input, p, tr, agent, _ := cycleFixture(t, kind)
 		p.decisions[0] = p.decisions[1]
+		if kind == ports.PlannerDecisionPrepareExecutor {
+			out, err := o.Run(context.Background(), input)
+			if !errors.Is(err, ErrInvalidOrchestrator) || out != (OrchestrationOutput{}) || len(p.calls) != 1 || tr.calls != 0 || agent.calls != 0 {
+				t.Fatal("unconfigured executor did not fail closed")
+			}
+			continue
+		}
 		out, err := o.Run(context.Background(), input)
 		if err != nil || out.Decision != p.decisions[0] || len(p.calls) != 1 || tr.calls != 0 || agent.calls != 0 {
 			t.Fatal("non-evidence decision executed", err)
@@ -257,5 +273,225 @@ func TestPlannerRequestEvidenceBoundary(t *testing.T) {
 		if copy.Validate() == nil {
 			t.Fatal("bad evidence accepted", field)
 		}
+	}
+}
+
+type cycleExecutor struct {
+	calls  int
+	result ports.ExecutorResult
+	err    error
+	check  func(ports.ExecutorRequest)
+}
+
+func (e *cycleExecutor) Execute(_ context.Context, r ports.ExecutorRequest) (ports.ExecutorResult, error) {
+	e.calls++
+	if e.check != nil {
+		e.check(r)
+	}
+	return e.result, e.err
+}
+func executorFixture(t *testing.T) (*Orchestrator, OrchestrationInput, *cycleExecutor, *memory.TaskRepository) {
+	t.Helper()
+	o, input, p, _, _, tasks := cycleFixture(t, ports.PlannerDecisionPrepareExecutor)
+	p.decisions[0] = p.decisions[1]
+	e := &cycleExecutor{result: ports.ExecutorResult{ProjectID: input.ProjectID, TaskID: input.TaskID, Outcome: ports.ExecutorOutcomeDone, Summary: "execution mentioned BLOCKED"}}
+	r := codexTaskRequestForTest()
+	o.executorCycle = &ExecutorCycleConfig{Resolver: TrustedExecutorTaskSpecResolver{Specs: map[ExecutorTaskIdentity]ports.ExecutorTaskSpec{{input.ProjectID, input.TaskID}: r.Spec}}, Executor: e, Tasks: tasks, TaskMetadata: r.Metadata, ResultMetadata: CodexResultMetadata{ProtocolVersion: r.Metadata.ProtocolVersion, MessageID: "result", CorrelationID: r.Metadata.CorrelationID, SessionID: r.Metadata.SessionID, CreatedAt: r.Metadata.CreatedAt}}
+	return o, input, e, tasks
+}
+func TestOrchestratorExecutorCycle(t *testing.T) {
+	for outcome, status := range map[ports.ExecutorOutcome]domain.TaskStatus{ports.ExecutorOutcomeDone: domain.TaskStatusDone, ports.ExecutorOutcomeBlocked: domain.TaskStatusBlocked, ports.ExecutorOutcomeFailed: domain.TaskStatusFailed} {
+		t.Run(string(outcome), func(t *testing.T) {
+			o, input, e, tasks := executorFixture(t)
+			e.result.Outcome = outcome
+			e.check = func(r ports.ExecutorRequest) {
+				stored, _, _ := tasks.FindByID(context.Background(), input.TaskID)
+				if stored.Status != domain.TaskStatusInProgress || !reflect.DeepEqual(r.Spec, codexTaskRequestForTest().Spec) {
+					t.Fatal("execution before valid state/spec")
+				}
+			}
+			out, err := o.Run(context.Background(), input)
+			if err != nil {
+				t.Fatal(err)
+			}
+			stored, _, _ := tasks.FindByID(context.Background(), input.TaskID)
+			if e.calls != 1 || stored.Status != status || out.CodexTask == nil || out.CodexResult == nil {
+				t.Fatal("cycle incomplete")
+			}
+			if !reflect.DeepEqual(out.CodexTask.Payload.(CodexTask).Spec, codexTaskRequestForTest().Spec) || out.CodexResult.Payload.(CodexResult).Outcome != outcome || out.CodexResult.ProjectID != input.ProjectID || *out.CodexResult.TaskID != input.TaskID || out.CodexResult.CorrelationID != out.CodexTask.CorrelationID {
+				t.Fatal("contract changed")
+			}
+			_, err = o.Run(context.Background(), input)
+			if err == nil || e.calls != 1 {
+				t.Fatal("incompatible state retried")
+			}
+		})
+	}
+}
+func TestOrchestratorExecutorFailClosed(t *testing.T) {
+	for _, kind := range []string{"missing config", "resolver", "invalid spec", "task metadata", "result metadata", "metadata correlation", "project", "task", "invalid result", "boundary", "cancel", "state"} {
+		t.Run(kind, func(t *testing.T) {
+			o, input, e, tasks := executorFixture(t)
+			sentinel := errors.New("boundary")
+			wantCalls := 0
+			wantState := domain.TaskStatusAnalyzing
+			switch kind {
+			case "missing config":
+				o.executorCycle = nil
+			case "resolver":
+				o.executorCycle.Resolver = TrustedExecutorTaskSpecResolver{}
+			case "invalid spec":
+				o.executorCycle.Resolver = TrustedExecutorTaskSpecResolver{Specs: map[ExecutorTaskIdentity]ports.ExecutorTaskSpec{{input.ProjectID, input.TaskID}: {Objective: "bad"}}}
+			case "task metadata":
+				o.executorCycle.TaskMetadata.MessageID = ""
+			case "result metadata":
+				o.executorCycle.ResultMetadata.MessageID = ""
+			case "metadata correlation":
+				o.executorCycle.ResultMetadata.CorrelationID = "other"
+			case "project":
+				e.result.ProjectID = "other"
+				wantCalls = 1
+			case "task":
+				e.result.TaskID = "other"
+				wantCalls = 1
+			case "invalid result":
+				e.result.Outcome = "CANCELLED"
+				wantCalls = 1
+			case "boundary":
+				e.err = sentinel
+				wantCalls = 1
+			case "cancel":
+				e.err = context.Canceled
+				wantCalls = 1
+			case "state":
+				task, _, _ := tasks.FindByID(context.Background(), input.TaskID)
+				task.Status = domain.TaskStatusReadyForCodex
+				tasks.Save(context.Background(), task)
+				wantState = domain.TaskStatusReadyForCodex
+			}
+			if wantCalls == 1 {
+				wantState = domain.TaskStatusInProgress
+			}
+			out, err := o.Run(context.Background(), input)
+			if err == nil || out != (OrchestrationOutput{}) || e.calls != wantCalls {
+				t.Fatalf("failure not closed: %+v %v calls=%d", out, err, e.calls)
+			}
+			if kind == "boundary" && !errors.Is(err, sentinel) || kind == "cancel" && !errors.Is(err, context.Canceled) {
+				t.Fatal("boundary lost")
+			}
+			stored, _, _ := tasks.FindByID(context.Background(), input.TaskID)
+			if stored.Status != wantState {
+				t.Fatalf("state=%s", stored.Status)
+			}
+			if wantCalls == 1 {
+				if _, retryErr := o.Run(context.Background(), input); retryErr == nil || e.calls != 1 {
+					t.Fatal("uncertain result retried")
+				}
+			}
+		})
+	}
+}
+
+type recordingCycleTasks struct {
+	ports.TaskRepository
+	statuses []domain.TaskStatus
+}
+
+func (r *recordingCycleTasks) Save(ctx context.Context, task domain.Task) error {
+	r.statuses = append(r.statuses, task.Status)
+	return r.TaskRepository.Save(ctx, task)
+}
+
+type cycleSpecResolver struct {
+	spec  ports.ExecutorTaskSpec
+	err   error
+	check func(ports.PlannerDecision, PlannerContext)
+}
+
+func (r cycleSpecResolver) Resolve(_ context.Context, d ports.PlannerDecision, c PlannerContext) (ports.ExecutorTaskSpec, error) {
+	if r.check != nil {
+		r.check(d, c)
+	}
+	return r.spec, r.err
+}
+func TestOrchestratorWorkflowSequenceAndTrustedContext(t *testing.T) {
+	o, input, e, tasks := executorFixture(t)
+	recorder := &recordingCycleTasks{TaskRepository: tasks}
+	config := *o.executorCycle
+	config.Tasks = recorder
+	config.Resolver = cycleSpecResolver{spec: codexTaskRequestForTest().Spec, check: func(d ports.PlannerDecision, c PlannerContext) {
+		if c.CurrentTask.Title == "stale" || c.Project.ID != d.ProjectID || c.CurrentTask.ID != d.TaskID {
+			t.Fatal("resolver received caller snapshot")
+		}
+	}}
+	o = NewOrchestrator(o.builder, o.planner, o.resolver, o.transport, o.metadata, config)
+	out, err := o.Run(context.Background(), input)
+	if err != nil || out.Validate(input) != nil || e.calls != 1 {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(recorder.statuses, []domain.TaskStatus{domain.TaskStatusReadyForCodex, domain.TaskStatusInProgress, domain.TaskStatusDone}) {
+		t.Fatal("workflow sequence", recorder.statuses)
+	}
+	for _, kind := range []string{"partial", "project", "task", "correlation", "session", "payload"} {
+		t.Run(kind, func(t *testing.T) {
+			copy := out
+			task := *out.CodexTask
+			result := *out.CodexResult
+			copy.CodexTask = &task
+			copy.CodexResult = &result
+			switch kind {
+			case "partial":
+				copy.CodexResult = nil
+			case "project":
+				task.ProjectID = "other"
+			case "task":
+				id := domain.TaskID("other")
+				result.TaskID = &id
+			case "correlation":
+				result.CorrelationID = "other"
+			case "session":
+				result.SessionID = nil
+			case "payload":
+				task.Payload = "untyped"
+			}
+			if copy.Validate(input) == nil {
+				t.Fatal("mismatch accepted")
+			}
+		})
+	}
+}
+func TestOrchestratorUntrustedSpecAndStateChanges(t *testing.T) {
+	for _, kind := range []string{"resolver error", "invalid spec", "state changed", "project changed"} {
+		t.Run(kind, func(t *testing.T) {
+			o, input, e, tasks := executorFixture(t)
+			sentinel := errors.New("resolver boundary")
+			resolver := cycleSpecResolver{spec: codexTaskRequestForTest().Spec}
+			switch kind {
+			case "resolver error":
+				resolver.err = sentinel
+			case "invalid spec":
+				resolver.spec.Scope = []string{"../escape"}
+			default:
+				resolver.check = func(_ ports.PlannerDecision, _ PlannerContext) {
+					task, _, _ := tasks.FindByID(context.Background(), input.TaskID)
+					if kind == "state changed" {
+						task.Status = domain.TaskStatusInProgress
+					} else {
+						task.ProjectID = "other"
+					}
+					if err := tasks.Save(context.Background(), task); err != nil {
+						t.Fatal(err)
+					}
+				}
+			}
+			o.executorCycle.Resolver = resolver
+			out, err := o.Run(context.Background(), input)
+			if err == nil || out != (OrchestrationOutput{}) || e.calls != 0 {
+				t.Fatal("invalid authority/state executed")
+			}
+			if kind == "resolver error" && !errors.Is(err, sentinel) {
+				t.Fatal("resolver error lost")
+			}
+		})
 	}
 }

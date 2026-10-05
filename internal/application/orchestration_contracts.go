@@ -40,11 +40,12 @@ func (r OrchestrationInput) Validate() error {
 	return nil
 }
 
-// OrchestrationOutput carries only a planner intention. Validation performs no
-// capability execution, persistence, task transition, or session lifecycle work.
-// PlannerSession and canonical Task state remain separate responsibilities.
+// OrchestrationOutput carries the final intention and optional completed executor cycle.
+// Boundary failures return no output, even when execution may have started.
 type OrchestrationOutput struct {
-	Decision ports.PlannerDecision
+	Decision    ports.PlannerDecision
+	CodexTask   *domain.Envelope
+	CodexResult *domain.Envelope
 }
 
 func (r OrchestrationOutput) Validate(input OrchestrationInput) error {
@@ -56,6 +57,29 @@ func (r OrchestrationOutput) Validate(input OrchestrationInput) error {
 	}
 	if r.Decision.ProjectID != input.ProjectID || r.Decision.TaskID != input.TaskID {
 		return ErrPlannerTaskIdentityMismatch
+	}
+	if r.CodexTask != nil || r.CodexResult != nil {
+		if r.Decision.Type != ports.PlannerDecisionPrepareExecutor || r.CodexTask == nil || r.CodexResult == nil {
+			return ErrInvalidOrchestrationContext
+		}
+		if err := r.CodexTask.Validate(); err != nil {
+			return err
+		}
+		payload, ok := r.CodexTask.Payload.(CodexTask)
+		if !ok || r.CodexTask.MessageType != domain.MessageTypeCodexTask || payload.Validate() != nil {
+			return ErrInvalidOrchestrationContext
+		}
+		if err := ValidateCodexResultEnvelope(*r.CodexResult); err != nil {
+			return err
+		}
+		for _, e := range []*domain.Envelope{r.CodexTask, r.CodexResult} {
+			if e.ProjectID != input.ProjectID || e.TaskID == nil || *e.TaskID != input.TaskID {
+				return ErrPlannerTaskIdentityMismatch
+			}
+		}
+		if !sameExecutorCorrelation(*r.CodexTask, *r.CodexResult) {
+			return ErrInvalidOrchestrationContext
+		}
 	}
 	return nil
 }
