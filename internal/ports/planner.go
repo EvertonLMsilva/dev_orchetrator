@@ -25,6 +25,8 @@ type PlannerRequest struct {
 	TaskID    domain.TaskID
 	Context   PlannerContext
 	Evidence  []PlannerEvidence
+	// UserIntent is the current declarative message; it grants no execution authority.
+	UserIntent string
 }
 
 func (r PlannerRequest) Validate() error {

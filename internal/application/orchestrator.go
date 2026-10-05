@@ -61,7 +61,7 @@ func (o *Orchestrator) Run(ctx context.Context, input OrchestrationInput) (Orche
 	if err != nil {
 		return OrchestrationOutput{}, err
 	}
-	request := ports.PlannerRequest{ProjectID: input.ProjectID, TaskID: input.TaskID, Context: canonical}
+	request := ports.PlannerRequest{ProjectID: input.ProjectID, TaskID: input.TaskID, Context: canonical, UserIntent: input.UserIntent}
 	decision, err := o.plan(ctx, request)
 	if err != nil {
 		return OrchestrationOutput{}, err

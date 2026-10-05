@@ -19,10 +19,12 @@ type OrchestrationInput struct {
 	TaskID    domain.TaskID
 	Context   PlannerContext
 	Evidence  []PlannerEvidence
+	// UserIntent is the current declarative message; it grants no execution authority.
+	UserIntent string
 }
 
 func (r OrchestrationInput) Validate() error {
-	request := ports.PlannerRequest{ProjectID: r.ProjectID, TaskID: r.TaskID, Context: r.Context, Evidence: r.Evidence}
+	request := ports.PlannerRequest{ProjectID: r.ProjectID, TaskID: r.TaskID, Context: r.Context, Evidence: r.Evidence, UserIntent: r.UserIntent}
 	if err := request.Validate(); err != nil {
 		return err
 	}
