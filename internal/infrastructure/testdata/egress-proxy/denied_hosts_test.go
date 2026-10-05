@@ -1,6 +1,34 @@
 package main
 
-import "testing"
+import (
+	"bytes"
+	"strings"
+	"testing"
+)
+
+func TestSafeConnectionOutcomes(t *testing.T) {
+	for _, tc := range []struct{ line, want string }{
+		{`CONNECT   Oct 05 12:30:00.123 [7]: Established connection to host "chatgpt.com" using file descriptor 5.`, "CONNECT_STATE chatgpt.com 443 SUCCESS SUCCESS UNKNOWN"},
+		{`ERROR     Oct 05 12:30:00.123 [7]: opensock: Could not establish a connection to chatgpt.com:443`, "CONNECT_STATE chatgpt.com 443 SUCCESS FAIL NO"},
+		{`ERROR     Oct 05 12:30:00.123 [7]: opensock: Could not retrieve address info for chatgpt.com:443: SECRET`, "CONNECT_STATE chatgpt.com 443 FAIL UNKNOWN NO"},
+		{`ERROR     Oct 05 12:30:00.123 [7]: Authorization: Bearer SECRET`, ""},
+		{`CONNECT   Oct 05 12:30:00.123 [7]: Established connection to host "user:SECRET@chatgpt.com" using file descriptor 5.`, ""},
+		{`ERROR     Oct 05 12:30:00.123 [7]: auth.json access_token refresh_token id_token account_id SECRET`, ""},
+	} {
+		if got := connectionDiagnostic(tc.line); got != tc.want {
+			t.Fatal("unsafe or incorrect connection outcome")
+		}
+	}
+}
+
+func TestDiagnosticOutputBounded(t *testing.T) {
+	line := "CONNECT   Oct 05 12:30:00.123 [7]: Request (file descriptor 4): CONNECT chatgpt.com:443 HTTP/1.1\n"
+	var output bytes.Buffer
+	sanitizeProxyLogs(strings.NewReader(strings.Repeat(line, 300)+"Authorization: SECRET\nHTTPS_PAYLOAD_SECRET\n"), &output)
+	if strings.Count(output.String(), "\n") != 128 || strings.Contains(output.String(), "SECRET") {
+		t.Fatal("diagnostics not bounded or sanitized")
+	}
+}
 
 func TestConnectDiagnosticOnly(t *testing.T) {
 	for _, tc := range []struct{ line, want string }{

@@ -74,9 +74,12 @@ func codexProxyCreateOptions(private, external, config, filter string) client.Co
 
 // Only sanitized DNS names leave infrastructure, solely for opt-in diagnostics.
 type codexProxyDiagnostic struct {
-	Host     string
-	Port     int
-	Decision string
+	Host              string
+	Port              int
+	Decision          string
+	DNSResolution     string
+	UpstreamConnect   string
+	TunnelEstablished string
 }
 
 // Decision describes the exact CONNECT policy, not successful TLS or routing.
@@ -84,7 +87,10 @@ func safeProxyDiagnostics(logs string, hosts []string) []codexProxyDiagnostic {
 	var result []codexProxyDiagnostic
 	for _, line := range strings.Split(logs, "\n") {
 		fields := strings.Fields(line)
-		if len(fields) != 3 || fields[0] != "CONNECT_HOST" || len(fields[1]) > 253 || !codexHostname.MatchString(fields[1]) || regexp.MustCompile(`^[0-9.]+$`).MatchString(fields[1]) {
+		if len(result) >= 128 {
+			break
+		}
+		if (len(fields) != 3 && len(fields) != 6) || (fields[0] != "CONNECT_HOST" && fields[0] != "CONNECT_STATE") || len(fields[1]) > 253 || !codexHostname.MatchString(fields[1]) || regexp.MustCompile(`^[0-9.]+$`).MatchString(fields[1]) {
 			continue
 		}
 		port, err := strconv.Atoi(fields[2])
@@ -97,7 +103,27 @@ func safeProxyDiagnostics(logs string, hosts []string) []codexProxyDiagnostic {
 				decision = "ALLOW"
 			}
 		}
-		result = append(result, codexProxyDiagnostic{fields[1], port, decision})
+		if fields[0] == "CONNECT_STATE" {
+			if len(fields) != 6 || port != 443 {
+				continue
+			}
+			state := strings.Join(fields[3:], " ")
+			if state != "SUCCESS SUCCESS UNKNOWN" && state != "SUCCESS FAIL NO" && state != "FAIL UNKNOWN NO" {
+				continue
+			}
+			// Do not associate host-only outcomes with overlapping/retried requests:
+			// emit separate observations, preserving unknown where correlation is absent.
+			result = append(result, codexProxyDiagnostic{fields[1], port, decision, fields[3], fields[4], fields[5]})
+			continue
+		}
+		if len(fields) != 3 {
+			continue
+		}
+		tunnel := "UNKNOWN"
+		if decision == "DENY" {
+			tunnel = "NO"
+		}
+		result = append(result, codexProxyDiagnostic{fields[1], port, decision, "UNKNOWN", "UNKNOWN", tunnel})
 	}
 	return result
 }

@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"fmt"
+	"io"
 	"os"
 	"regexp"
 	"strconv"
@@ -33,15 +34,53 @@ func deniedHost(line string) string {
 	}
 	return match[1]
 }
-func main() {
-	scanner := bufio.NewScanner(os.Stdin)
+
+// Pinned 1.11.3 direct-connect messages. Never forward error text, addresses,
+// headers or bodies. Successful TCP connection implies DNS succeeded, but
+// does not prove CONNECT greeting delivery or TLS success.
+var outcome = regexp.MustCompile(`^(CONNECT|ERROR) +[A-Z][a-z]{2} [0-9]{2} [0-9:.]+ \[[0-9]+\]: (.*)$`)
+var established = regexp.MustCompile(`^Established connection to host "([a-z0-9.-]+)" using file descriptor [0-9]+\.$`)
+var dnsFailed = regexp.MustCompile(`^opensock: Could not retrieve address info for ([a-z0-9.-]+):443: .*$`)
+var tcpFailed = regexp.MustCompile(`^opensock: Could not establish a connection to ([a-z0-9.-]+):443$`)
+
+func connectionDiagnostic(line string) string {
+	m := outcome.FindStringSubmatch(line)
+	if len(m) != 3 {
+		return ""
+	}
+	var host, state string
+	if v := established.FindStringSubmatch(m[2]); m[1] == "CONNECT" && len(v) == 2 {
+		host, state = v[1], "SUCCESS SUCCESS UNKNOWN"
+	}
+	if v := dnsFailed.FindStringSubmatch(m[2]); m[1] == "ERROR" && len(v) == 2 {
+		host, state = v[1], "FAIL UNKNOWN NO"
+	}
+	if v := tcpFailed.FindStringSubmatch(m[2]); m[1] == "ERROR" && len(v) == 2 {
+		host, state = v[1], "SUCCESS FAIL NO"
+	}
+	// Reuse strict bare-host validation rather than emitting arbitrary captures.
+	if state == "" || connectDiagnostic("CONNECT   Oct 05 12:30:00 [1]: Request (file descriptor 1): CONNECT "+host+":443 HTTP/1.1") == "" {
+		return ""
+	}
+	return "CONNECT_STATE " + host + " 443 " + state
+}
+
+func sanitizeProxyLogs(input io.Reader, output io.Writer) {
+	scanner := bufio.NewScanner(input)
 	scanner.Buffer(make([]byte, 4096), 8192)
+	emitted := 0
 	for scanner.Scan() {
-		if diagnostic := connectDiagnostic(scanner.Text()); diagnostic != "" {
-			fmt.Println(diagnostic)
+		diagnostic := connectDiagnostic(scanner.Text())
+		if diagnostic == "" {
+			diagnostic = connectionDiagnostic(scanner.Text())
 		}
 		if host := deniedHost(scanner.Text()); host != "" {
-			fmt.Println("DENIED_HOST " + host)
+			diagnostic = "DENIED_HOST " + host
+		}
+		if diagnostic != "" && emitted < 128 {
+			fmt.Fprintln(output, diagnostic)
+			emitted++
 		}
 	}
 }
+func main() { sanitizeProxyLogs(os.Stdin, os.Stdout) }

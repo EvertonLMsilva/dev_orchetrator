@@ -48,9 +48,23 @@ func TestProxyDiagnosticDockerStream(t *testing.T) {
 func TestSafeProxyDiagnostics(t *testing.T) {
 	logs := "CONNECT_HOST chatgpt.com 443\nCONNECT_HOST unknown.example 443\nCONNECT_HOST chatgpt.com 80\nCONNECT_HOST user:TOKEN_SECRET@chatgpt.com 443\nDENIED_HOST unknown.example\nraw TOKEN_SECRET\n"
 	got := safeProxyDiagnostics(logs, []string{"chatgpt.com"})
-	want := []codexProxyDiagnostic{{"chatgpt.com", 443, "ALLOW"}, {"unknown.example", 443, "DENY"}, {"chatgpt.com", 80, "DENY"}}
+	want := []codexProxyDiagnostic{{"chatgpt.com", 443, "ALLOW", "UNKNOWN", "UNKNOWN", "UNKNOWN"}, {"unknown.example", 443, "DENY", "UNKNOWN", "UNKNOWN", "NO"}, {"chatgpt.com", 80, "DENY", "UNKNOWN", "UNKNOWN", "NO"}}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatal("proxy diagnostics mismatch")
+	}
+}
+
+func TestSafeProxyConnectionStates(t *testing.T) {
+	logs := "CONNECT_STATE chatgpt.com 443 SUCCESS SUCCESS UNKNOWN\nCONNECT_STATE chatgpt.com 443 SUCCESS FAIL NO\nCONNECT_STATE chatgpt.com 443 FAIL UNKNOWN NO\nCONNECT_HOST denied.example 443\n"
+	got := safeProxyDiagnostics(logs+"CONNECT_STATE chatgpt.com 443 SECRET SUCCESS YES\nAuthorization: SECRET\nresponse_body SECRET\n", []string{"chatgpt.com"})
+	if len(got) != 4 || got[0].Decision != "ALLOW" || got[0].DNSResolution != "SUCCESS" || got[0].UpstreamConnect != "SUCCESS" || got[0].TunnelEstablished != "UNKNOWN" || got[1].UpstreamConnect != "FAIL" || got[1].TunnelEstablished != "NO" || got[2].DNSResolution != "FAIL" || got[3].Decision != "DENY" {
+		t.Fatal("unsafe connection states")
+	}
+	if strings.Contains(fmt.Sprint(got), "SECRET") {
+		t.Fatal("secret diagnostics")
+	}
+	if len(safeProxyDiagnostics(strings.Repeat(logs, 300), []string{"chatgpt.com"})) != 128 {
+		t.Fatal("unbounded diagnostic records")
 	}
 }
 

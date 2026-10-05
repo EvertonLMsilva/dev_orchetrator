@@ -62,7 +62,7 @@ func TestAuthenticatedCodexLiveOptIn(t *testing.T) {
 			return
 		}
 		for _, diagnostic := range diagnostics {
-			t.Logf("proxy CONNECT_attempted=yes requested_hostname=%s requested_port=%d decision=%s decision_basis=policy", diagnostic.Host, diagnostic.Port, diagnostic.Decision)
+			t.Logf("proxy requested_hostname=%s requested_port=%d policy_decision=%s dns_resolution=%s upstream_connect=%s tunnel_established=%s", diagnostic.Host, diagnostic.Port, diagnostic.Decision, diagnostic.DNSResolution, diagnostic.UpstreamConnect, diagnostic.TunnelEstablished)
 		}
 	}()
 	bP4Status := "BLOCKED_BEFORE_REPRODUCTION"
@@ -91,6 +91,7 @@ func TestAuthenticatedCodexLiveOptIn(t *testing.T) {
 				t.Logf("account_read response_shape=%s", diagnostic.ResponseShape)
 			}
 			if diagnostic.Kind == "workspace_routing" {
+				t.Log("workspace_routing request_stage=accounts_check response_received=unknown http_status=unknown content_type_class=unknown json_decode=UNKNOWN redirect_observed=unknown redirect_hostname=unknown redirect_port=unknown authorization_header_present=unknown chatgpt_account_id_header_present=unknown observation_scope=opaque_tls")
 				bP4Status = "REPRODUCED"
 				t.Log("B_P4_001=REPRODUCED rpc=account/read")
 			}
