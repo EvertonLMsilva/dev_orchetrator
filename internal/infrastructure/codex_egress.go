@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/netip"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 
@@ -58,7 +59,7 @@ func codexProxyPolicy(hosts []string) (string, string, error) {
 		// URLs, alternate ports, IPs, userinfo, path suffixes and subdomains.
 		filter.WriteString("^" + strings.ReplaceAll(host, ".", `\.`) + ":443$\n")
 	}
-	config := "Port 8888\nTimeout 30\nMaxClients 16\nLogLevel Notice\nPidFile \"/run/proxy/tinyproxy.pid\"\nConnectPort 443\nFilter \"/run/proxy/allowlist\"\nFilterURLs On\nFilterType ere\nFilterCaseSensitive On\nFilterDefaultDeny Yes\n"
+	config := "Port 8888\nTimeout 30\nMaxClients 16\nLogLevel Connect\nPidFile \"/run/proxy/tinyproxy.pid\"\nConnectPort 443\nFilter \"/run/proxy/allowlist\"\nFilterURLs On\nFilterType ere\nFilterCaseSensitive On\nFilterDefaultDeny Yes\n"
 	return config, filter.String(), nil
 }
 
@@ -72,6 +73,50 @@ func codexProxyCreateOptions(private, external, config, filter string) client.Co
 }
 
 // Only sanitized DNS names leave infrastructure, solely for opt-in diagnostics.
+type codexProxyDiagnostic struct {
+	Host     string
+	Port     int
+	Decision string
+}
+
+// Decision describes the exact CONNECT policy, not successful TLS or routing.
+func safeProxyDiagnostics(logs string, hosts []string) []codexProxyDiagnostic {
+	var result []codexProxyDiagnostic
+	for _, line := range strings.Split(logs, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) != 3 || fields[0] != "CONNECT_HOST" || len(fields[1]) > 253 || !codexHostname.MatchString(fields[1]) || regexp.MustCompile(`^[0-9.]+$`).MatchString(fields[1]) {
+			continue
+		}
+		port, err := strconv.Atoi(fields[2])
+		if err != nil || port < 1 || port > 65535 {
+			continue
+		}
+		decision := "DENY"
+		for _, host := range hosts {
+			if port == 443 && host == fields[1] {
+				decision = "ALLOW"
+			}
+		}
+		result = append(result, codexProxyDiagnostic{fields[1], port, decision})
+	}
+	return result
+}
+
+func (o *ownedCodexEgress) proxyDiagnostics(ctx context.Context, hosts []string) ([]codexProxyDiagnostic, error) {
+	ctx, cancel := context.WithTimeout(ctx, dockerOperationTimeout)
+	defer cancel()
+	logs, err := o.client.ContainerLogs(ctx, o.proxy, client.ContainerLogsOptions{ShowStdout: true, Tail: "128"})
+	if err != nil {
+		return nil, errors.New("proxy diagnostics unavailable")
+	}
+	defer logs.Close()
+	var output bytes.Buffer
+	if err := copyCodexProcessStdout(&output, io.LimitReader(logs, 64*1024)); err != nil && !errors.Is(err, io.EOF) {
+		return nil, errors.New("proxy diagnostics unavailable")
+	}
+	return safeProxyDiagnostics(output.String(), hosts), nil
+}
+
 func (o *ownedCodexEgress) blockedDestination(ctx context.Context) string {
 	ctx, cancel := context.WithTimeout(ctx, dockerOperationTimeout)
 	defer cancel()

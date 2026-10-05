@@ -2,7 +2,9 @@ package infrastructure
 
 import (
 	"context"
+	"errors"
 	"os"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -48,9 +50,25 @@ func TestAuthenticatedCodexLiveOptIn(t *testing.T) {
 		}
 	}()
 	owned := session.(*CodexProcessTransport).docker.(*ownedCodexEgress)
+	// Registered after Close's defer, so diagnostics are captured before cleanup.
+	defer func() {
+		diagnostics, err := owned.proxyDiagnostics(context.Background(), strings.Split(configuredHosts, ","))
+		if err != nil {
+			t.Log("proxy_diagnostics=unavailable")
+			return
+		}
+		if len(diagnostics) == 0 {
+			t.Log("proxy CONNECT_attempted=no observed_in_bounded_log")
+			return
+		}
+		for _, diagnostic := range diagnostics {
+			t.Logf("proxy CONNECT_attempted=yes requested_hostname=%s requested_port=%d decision=%s decision_basis=policy", diagnostic.Host, diagnostic.Port, diagnostic.Decision)
+		}
+	}()
+	bP4Status := "BLOCKED_BEFORE_REPRODUCTION"
 	checkDenied := func() {
 		if host := owned.blockedDestination(context.Background()); host != "" {
-			t.Fatalf("BLOCKED_LIVE_DESTINATION blocked_destination=%s; B_P4_001=BLOCKED_BEFORE_REPRODUCTION; PLANNER_REVIEW", host)
+			t.Fatalf("BLOCKED_LIVE_DESTINATION blocked_destination=%s; B_P4_001=%s; PLANNER_REVIEW", host, bP4Status)
 		}
 	}
 	transport := codexContextTransport{ctx: ctx, session: session}
@@ -61,8 +79,26 @@ func TestAuthenticatedCodexLiveOptIn(t *testing.T) {
 	}
 	t.Log("initialize=PASS")
 	accountErr := requireCodexChatGPTAccount(transport)
+	if accountErr != nil {
+		var diagnostic *CodexAccountReadError
+		if errors.As(accountErr, &diagnostic) {
+			code := "none"
+			if diagnostic.RPCCode != nil {
+				code = strconv.FormatInt(*diagnostic.RPCCode, 10)
+			}
+			t.Logf("account_read classification=%s rpc_code=%s safe_message=%s", diagnostic.Kind, code, diagnostic.SafeMessage)
+			if diagnostic.Kind == "workspace_routing" {
+				bP4Status = "REPRODUCED"
+				t.Log("B_P4_001=REPRODUCED rpc=account/read")
+			}
+		}
+	}
 	checkDenied()
 	if accountErr != nil {
+		var diagnostic *CodexAccountReadError
+		if errors.As(accountErr, &diagnostic) && diagnostic.Kind == "workspace_routing" {
+			t.Fatal("account_read=FAIL; B_P4_001=REPRODUCED")
+		}
 		t.Fatal("account_read=FAIL; B_P4_001=BLOCKED_BEFORE_REPRODUCTION")
 	}
 	t.Log("account_read=PASS authenticated=yes")

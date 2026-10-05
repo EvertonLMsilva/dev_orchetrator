@@ -99,6 +99,19 @@ func TestCodexEgressDockerOptIn(t *testing.T) {
 	if host := o.blockedDestination(ctx); host != "unknown.test" {
 		t.Fatal("denied hostname unavailable")
 	}
+	diagnostics, err := o.proxyDiagnostics(ctx, []string{"allowed.test"})
+	if err != nil {
+		t.Fatal("proxy diagnostics unavailable")
+	}
+	seenAllow, seenDeny, seenPort := false, false, false
+	for _, diagnostic := range diagnostics {
+		seenAllow = seenAllow || diagnostic.Host == "allowed.test" && diagnostic.Port == 443 && diagnostic.Decision == "ALLOW"
+		seenDeny = seenDeny || diagnostic.Host == "unknown.test" && diagnostic.Port == 443 && diagnostic.Decision == "DENY"
+		seenPort = seenPort || diagnostic.Host == "allowed.test" && diagnostic.Port == 80 && diagnostic.Decision == "DENY"
+	}
+	if !seenAllow || !seenDeny || !seenPort {
+		t.Fatal("CONNECT diagnostics missing")
+	}
 	// Log filter drops URLs containing a token-shaped sentinel before Docker
 	// logs, while still retaining the bare denied DNS hostname above.
 	leakProbe := `const net=require('net');const s=net.connect(8888,'codex-egress');s.setTimeout(3000);s.on('connect',()=>s.write('GET http://allowed.test/?token=LOG_QUERY_SENTINEL HTTP/1.1\r\nHost: allowed.test\r\n\r\n'));s.on('data',()=>{s.destroy();process.exit(0)});s.on('error',()=>process.exit(1));s.on('timeout',()=>process.exit(2));`

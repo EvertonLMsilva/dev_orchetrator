@@ -2,6 +2,20 @@ package main
 
 import "testing"
 
+func TestConnectDiagnosticOnly(t *testing.T) {
+	for _, tc := range []struct{ line, want string }{
+		{`CONNECT   Oct 05 12:30:00.123 [7]: Request (file descriptor 4): CONNECT chatgpt.com:443 HTTP/1.1`, "CONNECT_HOST chatgpt.com 443"},
+		{`CONNECT   Oct 05 12:30:00.123 [7]: Request (file descriptor 4): CONNECT unknown.example:80 HTTP/1.1`, "CONNECT_HOST unknown.example 80"},
+		{`CONNECT   Oct 05 12:30:00.123 [7]: Request (file descriptor 4): CONNECT user:TOKEN_SECRET@chatgpt.com:443 HTTP/1.1`, ""},
+		{`CONNECT   Oct 05 12:30:00.123 [7]: Request (file descriptor 4): GET https://chatgpt.com/?token=TOKEN_SECRET HTTP/1.1`, ""},
+		{`CONNECT   Oct 05 12:30:00.123 [7]: Request (file descriptor 4): CONNECT chatgpt.com:443/path HTTP/1.1`, ""},
+	} {
+		if got := connectDiagnostic(tc.line); got != tc.want {
+			t.Fatal("CONNECT sanitization mismatch")
+		}
+	}
+}
+
 func TestDeniedHostOnly(t *testing.T) {
 	for _, tc := range []struct{ line, want string }{
 		{`NOTICE    Oct 05 12:30:00.123 [7]: Proxying refused on filtered url "unknown.example:443"`, "unknown.example"},

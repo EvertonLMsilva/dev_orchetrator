@@ -2,6 +2,7 @@ package infrastructure
 
 import (
 	"context"
+	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -13,6 +14,45 @@ import (
 	"github.com/moby/moby/api/types/network"
 	"github.com/moby/moby/client"
 )
+
+func TestProxyDiagnosticDockerStream(t *testing.T) {
+	for _, valid := range []bool{true, false} {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			payload := []byte("CONNECT_HOST chatgpt.com 443\n")
+			header := make([]byte, 8)
+			header[0] = 1
+			if !valid {
+				header[0] = 3
+			}
+			binary.BigEndian.PutUint32(header[4:], uint32(len(payload)))
+			w.Write(header)
+			w.Write(payload)
+		}))
+		sdk, err := client.New(client.WithHost(server.URL), client.WithVersion("1.53"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		owned := &ownedCodexEgress{DockerDriver: &DockerDriver{client: sdk}, proxy: "proxy"}
+		got, err := owned.proxyDiagnostics(context.Background(), []string{"chatgpt.com"})
+		if valid && (err != nil || len(got) != 1 || got[0].Decision != "ALLOW") {
+			t.Fatal("complete Docker log stream rejected")
+		}
+		if !valid && (err == nil || got != nil) {
+			t.Fatal("malformed Docker stream accepted")
+		}
+		sdk.Close()
+		server.Close()
+	}
+}
+
+func TestSafeProxyDiagnostics(t *testing.T) {
+	logs := "CONNECT_HOST chatgpt.com 443\nCONNECT_HOST unknown.example 443\nCONNECT_HOST chatgpt.com 80\nCONNECT_HOST user:TOKEN_SECRET@chatgpt.com 443\nDENIED_HOST unknown.example\nraw TOKEN_SECRET\n"
+	got := safeProxyDiagnostics(logs, []string{"chatgpt.com"})
+	want := []codexProxyDiagnostic{{"chatgpt.com", 443, "ALLOW"}, {"unknown.example", 443, "DENY"}, {"chatgpt.com", 80, "DENY"}}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatal("proxy diagnostics mismatch")
+	}
+}
 
 func TestCodexEgressProvisioningCleanup(t *testing.T) {
 	for _, stage := range []string{"success", "private", "external", "proxy-create", "proxy-start", "health", "cleanup"} {
