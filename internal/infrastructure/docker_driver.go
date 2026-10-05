@@ -46,11 +46,17 @@ func NewDockerDriver() (*DockerDriver, error) {
 func (d *DockerDriver) Close() error { return d.client.Close() }
 
 func codexSessionCreateOptions(c DockerEnvironmentConfig) client.ContainerCreateOptions {
-	return client.ContainerCreateOptions{
+	opts := client.ContainerCreateOptions{
 		Config:     &container.Config{Image: codexRuntimeImage, WorkingDir: c.WorkingDirectory(), Cmd: []string{"/bin/sleep", "300"}},
 		HostConfig: &container.HostConfig{Privileged: false, NetworkMode: "none", Mounts: []mount.Mount{{Type: mount.TypeBind, Source: c.WorkspaceSource(), Target: c.WorkspaceTarget()}}},
 		Platform:   &ocispec.Platform{OS: "linux"},
 	}
+	if c.authTmpfs {
+		opts.HostConfig.Mounts = append(opts.HostConfig.Mounts, mount.Mount{Type: mount.TypeTmpfs, Target: c.AuthTmpfsTarget(), TmpfsOptions: &mount.TmpfsOptions{Mode: 0700}})
+		opts.HostConfig.CapDrop = []string{"ALL"}
+		opts.HostConfig.SecurityOpt = []string{"no-new-privileges:true"}
+	}
+	return opts
 }
 
 func (d *DockerDriver) createCodexContainer(ctx context.Context, c DockerEnvironmentConfig) (string, error) {

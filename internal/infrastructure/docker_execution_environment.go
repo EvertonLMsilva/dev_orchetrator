@@ -48,6 +48,7 @@ type DockerExecutionEnvironment struct {
 	docker       DockerLifecycle
 	authRequired bool
 	authSource   chatGPTAuthSource
+	allowedHosts []string
 }
 
 func NewDockerExecutionEnvironment(docker DockerLifecycle) *DockerExecutionEnvironment {
@@ -81,7 +82,7 @@ func (e *DockerExecutionEnvironment) startCodexSession(ctx context.Context, conf
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	if e == nil || e.authRequired || config.authTmpfs {
+	if e == nil || (!e.authRequired && config.authTmpfs) {
 		return nil, errors.New("unauthenticated codex environment required")
 	}
 	if _, err := executionWorkspaceConfig(config.workspace); err != nil {
@@ -91,9 +92,31 @@ func (e *DockerExecutionEnvironment) startCodexSession(ctx context.Context, conf
 	if !ok || driver == nil {
 		return nil, errors.New("codex session driver required")
 	}
+	var material []byte
+	if e.authRequired {
+		if e.authSource == nil {
+			return nil, errors.New("authorized codex home required")
+		}
+		var err error
+		material, err = e.authSource.obtain(ctx)
+		defer clear(material)
+		if err != nil || len(material) == 0 {
+			return nil, errors.New("chatgpt authentication unavailable")
+		}
+		factory, ok := e.docker.(codexEgressFactory)
+		if !ok {
+			return nil, errors.New("controlled egress driver required")
+		}
+		owned, err := factory.prepareCodexEgress(ctx, e.allowedHosts)
+		if err != nil {
+			return nil, errors.New("controlled egress unavailable")
+		}
+		driver = owned
+		config.authTmpfs = true
+	}
 	id, err := driver.createCodexContainer(ctx, config)
 	cleanup := func(failure error) error {
-		if id == "" {
+		if id == "" && !e.authRequired {
 			return failure
 		}
 		cleanupCtx, cancel := context.WithTimeout(context.Background(), dockerOperationTimeout)
@@ -107,7 +130,7 @@ func (e *DockerExecutionEnvironment) startCodexSession(ctx context.Context, conf
 		return nil, cleanup(errors.New("codex session container creation failed"))
 	}
 	if id == "" {
-		return nil, errors.New("codex session empty container ID")
+		return nil, cleanup(errors.New("codex session empty container ID"))
 	}
 	if err := ctx.Err(); err != nil {
 		return nil, cleanup(err)
@@ -117,6 +140,15 @@ func (e *DockerExecutionEnvironment) startCodexSession(ctx context.Context, conf
 	}
 	if err := ctx.Err(); err != nil {
 		return nil, cleanup(err)
+	}
+	if e.authRequired {
+		authDriver, ok := driver.(interface {
+			prepareAuth(context.Context, string, string, []byte) error
+		})
+		if !ok || authDriver.prepareAuth(ctx, id, "/run/codex-auth/auth.json", material) != nil {
+			return nil, cleanup(errors.New("chatgpt authentication preparation failed"))
+		}
+		clear(material)
 	}
 	// Ownership now transfers, including when process startup fails.
 	transport, err := startCodexProcessRuntime(ctx, driver, id)
