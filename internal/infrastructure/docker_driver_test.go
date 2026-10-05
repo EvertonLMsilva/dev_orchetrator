@@ -197,7 +197,7 @@ func TestCodexRuntimeImageContract(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := "FROM node:22.14.0-bookworm-slim@sha256:1c18d9ab3af4585870b92e4dbc5cac5a0dc77dd13df1a5905cea89fc720eb05b\n\nRUN npm install --global --ignore-scripts @openai/codex@0.159.2\n\nWORKDIR /workspace\nENV CODEX_HOME=/run/codex-process\nRUN mkdir -p /run/codex-process\nCMD [\"/bin/sleep\", \"300\"]\n"
+	want := "FROM node:22.14.0-bookworm-slim@sha256:1c18d9ab3af4585870b92e4dbc5cac5a0dc77dd13df1a5905cea89fc720eb05b\n\nRUN apt-get update \\\n    && apt-get install -y --no-install-recommends ca-certificates \\\n    && rm -rf /var/lib/apt/lists/*\n\nRUN npm install --global --ignore-scripts @openai/codex@0.159.2\n\nWORKDIR /workspace\nENV CODEX_HOME=/run/codex-process\nRUN mkdir -p /run/codex-process\nCMD [\"/bin/sleep\", \"300\"]\n"
 	if strings.ReplaceAll(string(data), "\r\n", "\n") != want {
 		t.Fatal("runtime build must remain pinned and credential-free")
 	}

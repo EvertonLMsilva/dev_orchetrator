@@ -178,6 +178,23 @@ func TestAuthenticatedTLSProbeOffline(t *testing.T) {
 	}
 }
 
+// Runs only inside the runtime image with network disabled. No handshake or
+// authentication occurs; parsing real roots proves more than file existence.
+func TestAuthenticatedSystemRootsImageOffline(t *testing.T) {
+	if os.Getenv("P6_SYSTEM_ROOTS_IMAGE_OFFLINE") != "1" {
+		t.Skip("runtime image offline check required")
+	}
+	pool, err := x509.SystemCertPool()
+	if err != nil || pool == nil || len(pool.Subjects()) == 0 {
+		t.Fatal("system trust roots unavailable")
+	}
+	bundle, err := os.ReadFile("/etc/ssl/certs/ca-certificates.crt")
+	parsed := x509.NewCertPool()
+	if err != nil || !parsed.AppendCertsFromPEM(bundle) || len(parsed.Subjects()) == 0 {
+		t.Fatal("Debian system CA bundle unusable")
+	}
+}
+
 func TestAuthenticatedTLSWorkloadHelper(t *testing.T) {
 	if os.Getenv("P6_TLS_WORKLOAD_HELPER") != "1" {
 		t.Skip("internal workload helper")
