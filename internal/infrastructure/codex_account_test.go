@@ -8,6 +8,47 @@ import (
 	"testing"
 )
 
+func TestCodexAccountInterleavedNotifications(t *testing.T) {
+	account := `{"id":99,"result":{"account":{"type":"chatgpt","email":null,"planType":"plus"},"requiresOpenaiAuth":true}}`
+	notification := `{"method":"account/updated","params":{"authMode":"chatgpt","SECRET_KEY":"SECRET_TOKEN"},"emittedAtMs":1234}`
+	for _, tc := range []struct {
+		name     string
+		messages []string
+		fail     bool
+	}{
+		{"notifications_before_response", []string{notification, notification, account}, false},
+		{"immediate", []string{account}, false},
+		{"inert_notification", []string{`{"method":"tool/run","params":{"command":"SECRET_COMMAND","auth":{"access_token":"SECRET_TOKEN"},"allowlist":["SECRET_HOST"]},"emittedAtMs":null}`, account}, false},
+		{"wrong_id", []string{strings.Replace(account, `"id":99`, `"id":100`, 1), account}, true},
+		{"wrong_id_type", []string{strings.Replace(account, `"id":99`, `"id":"99"`, 1)}, true},
+		{"malformed", []string{`{"method":"account/updated","params":[],"emittedAtMs":1234}`, account}, true},
+		{"request_not_notification", []string{`{"id":4,"method":"tool/run","params":{}}`, account}, true},
+		{"invalid_timestamp", []string{`{"method":"account/updated","params":{},"emittedAtMs":"SECRET_TOKEN"}`, account}, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := &threadFake{messages: tc.messages}
+			err := requireCodexChatGPTAccount(f)
+			if (err != nil) != tc.fail {
+				t.Fatalf("correlation mismatch: %v", err)
+			}
+			if len(f.writes) != 1 {
+				t.Fatal("notification triggered additional operation")
+			}
+			if err != nil && strings.Contains(fmt.Sprintf("%+v", err), "SECRET") {
+				t.Fatal("notification payload leaked")
+			}
+		})
+	}
+	f := &threadFake{}
+	for i := 0; i < 129; i++ {
+		f.messages = append(f.messages, notification)
+	}
+	f.messages = append(f.messages, account)
+	if requireCodexChatGPTAccount(f) == nil || len(f.messages) != 1 {
+		t.Fatal("unbounded notification wait")
+	}
+}
+
 func TestCodexAccountSafeShape(t *testing.T) {
 	response := `{"id":99,"result":{"account":{"type":"chatgpt","email":"EMAIL_SECRET","planType":"plus"},"requiresOpenaiAuth":true,"workspaceRouting":null,"KEY_SECRET":"VALUE_SECRET"}}`
 	err := requireCodexChatGPTAccount(&threadFake{messages: []string{response}})

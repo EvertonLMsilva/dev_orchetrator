@@ -74,7 +74,7 @@ func safeCodexAccountShape(data []byte) string {
 		fields = append(fields, prefix+".unknown_fields="+presence)
 		return object
 	}
-	top := project("top", data, []string{"id", "jsonrpc", "method", "params", "result", "error"})
+	top := project("top", data, []string{"id", "jsonrpc", "method", "params", "result", "error", "emittedAtMs"})
 	result := project("result", top["result"], []string{"account", "requiresOpenaiAuth", "workspaceRouting"})
 	project("account", result["account"], []string{"type", "email", "planType", "usesCodexManagedCredentials"})
 	project("workspaceRouting", result["workspaceRouting"], []string{"accountRoutingOverride", "backendOrigin", "chatgptAccountId"})
@@ -84,7 +84,16 @@ func safeCodexAccountShape(data []byte) string {
 
 func requireCodexChatGPTAccount(transport codexHandshakeTransport) error {
 	failure := accountReadFailure("protocol_decode", "account response invalid")
-	if transport == nil || transport.Write([]byte(`{"id":99,"method":"account/read","params":{"refreshToken":false}}`)) != nil {
+	id := CodexIntegerID(99)
+	request, err := json.Marshal(struct {
+		ID     CodexRequestID  `json:"id"`
+		Method string          `json:"method"`
+		Params map[string]bool `json:"params"`
+	}{id, "account/read", map[string]bool{"refreshToken": false}})
+	if err != nil {
+		return failure
+	}
+	if transport == nil || transport.Write(request) != nil {
 		return accountReadFailure("transport", "account transport failed")
 	}
 	for notifications := 0; notifications <= 128; notifications++ {
@@ -92,53 +101,33 @@ func requireCodexChatGPTAccount(transport codexHandshakeTransport) error {
 		if err != nil {
 			return accountReadFailure("transport", "account transport failed")
 		}
-		var message struct {
-			ID     *int64          `json:"id"`
-			Method *string         `json:"method"`
-			Params json.RawMessage `json:"params"`
-			Error  json.RawMessage `json:"error"`
-			Result *struct {
-				Account *struct {
-					Type  string          `json:"type"`
-					Email json.RawMessage `json:"email"`
-					Plan  string          `json:"planType"`
-				} `json:"account"`
-				RequiresAuth *bool `json:"requiresOpenaiAuth"`
-			} `json:"result"`
-		}
-		d := json.NewDecoder(bytes.NewReader(data))
-		d.DisallowUnknownFields()
-		err = d.Decode(&message)
-		if err == nil {
-			err = d.Decode(new(any))
-			if err == io.EOF {
-				err = nil
-			} else {
-				err = failure
-			}
-		}
+		envelope, notification, envelopeErr := decodeCodexCorrelatedEnvelope(data, &id)
 		// Compute shape before clearing bytes; no scalar values or raw JSON
 		// survive in the returned diagnostic.
 		failure.ResponseShape = safeCodexAccountShape(data)
 		clear(data)
-		if err != nil {
+		if envelopeErr != nil {
 			return failure
 		}
-		if message.ID == nil && message.Method != nil && message.Result == nil && len(message.Error) == 0 {
+		if notification {
+			// During account verification events are discarded, never executed
+			// or interpreted as authorization. Payloads are not logged.
 			continue
 		}
-		if message.ID == nil || *message.ID != 99 || message.Method != nil {
-			return failure
+		var result struct {
+			Account *struct {
+				Type  string          `json:"type"`
+				Email json.RawMessage `json:"email"`
+				Plan  string          `json:"planType"`
+			} `json:"account"`
+			RequiresAuth *bool `json:"requiresOpenaiAuth"`
 		}
-		if len(message.Error) != 0 {
-			if message.Result != nil {
-				return failure
-			}
+		if len(envelope.Error) != 0 {
 			var rpc struct {
 				Code    *int64 `json:"code"`
 				Message string `json:"message"`
 			}
-			if json.Unmarshal(message.Error, &rpc) != nil || rpc.Code == nil {
+			if json.Unmarshal(envelope.Error, &rpc) != nil || rpc.Code == nil {
 				return failure
 			}
 			diagnostic := accountReadFailure("rpc_error", "account RPC failed")
@@ -151,10 +140,10 @@ func requireCodexChatGPTAccount(transport codexHandshakeTransport) error {
 			}
 			return diagnostic
 		}
-		if message.Result == nil || message.Result.RequiresAuth == nil {
+		if decodeCodexStrictObject(envelope.Result, &result) != nil || result.RequiresAuth == nil {
 			return failure
 		}
-		account := message.Result.Account
+		account := result.Account
 		if account == nil {
 			return accountReadFailure("account_unavailable", "account unavailable")
 		}
