@@ -29,9 +29,9 @@ type codexProcessDocker interface {
 	Remove(context.Context, string) error
 }
 
-// CodexProcessTransport owns one already-running, dedicated, unauthenticated
-// container with Codex installed. Ownership transfers at start, including on
-// failure. This task never creates threads/turns, installs Codex or injects auth.
+// CodexProcessTransport owns app-server lifecycle. The default startup also owns
+// its dedicated container, including failure cleanup; lease startup leaves the
+// container and tmpfs lifetime with RuntimeHomeLease. Neither creates RPC tasks.
 // The codec remains separate: Write accepts encoded bytes; Read returns one line.
 type CodexProcessTransport struct {
 	docker      codexProcessDocker
@@ -161,8 +161,9 @@ func (t *CodexProcessTransport) Read() ([]byte, error) {
 	}
 }
 
-// Close is idempotent. Stop/inspect errors never skip removal; cleanup uses fresh
-// bounded contexts, independent of caller cancellation. Errors omit daemon output.
+// Close is idempotent. Default sessions always attempt container removal; lease
+// sessions only confirm app-server exit after stdin EOF. Cleanup uses fresh,
+// bounded contexts independent of caller cancellation and omits daemon output.
 func (t *CodexProcessTransport) Close() error {
 	t.closeOnce.Do(func() {
 		close(t.closed)

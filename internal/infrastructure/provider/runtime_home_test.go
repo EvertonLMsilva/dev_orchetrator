@@ -25,6 +25,42 @@ type memoryRuntimeHome struct {
 	captureKind  string
 }
 
+type bootstrapMemoryHome struct{ memoryRuntimeHome }
+
+func (m *bootstrapMemoryHome) Prepare(_ context.Context, archive io.Reader) error {
+	r := tar.NewReader(archive)
+	h, err := r.Next()
+	if err != nil || h.Name != "config.toml" || h.Mode != 0600 {
+		return errors.New("invalid bootstrap archive")
+	}
+	m.config, err = io.ReadAll(r)
+	if err != nil {
+		return err
+	}
+	if _, err = r.Next(); err != io.EOF {
+		return errors.New("bootstrap contained credentials")
+	}
+	return nil
+}
+func TestRuntimeHomeBootstrapFreshSession(t *testing.T) {
+	s := testRuntimeStore(t)
+	m := &bootstrapMemoryHome{}
+	l, err := s.Bootstrap(context.Background(), m)
+	if err != nil {
+		t.Fatal("bootstrap failed")
+	}
+	if len(m.auth) != 0 || string(m.config) != runtimeHomeConfig {
+		t.Fatal("bootstrap imported credentials")
+	}
+	m.auth = []byte(runtimeAuth)
+	if l.Finish(context.Background()) != nil || !m.removed {
+		t.Fatal("bootstrap capture failed")
+	}
+	if _, err = s.Bootstrap(context.Background(), &bootstrapMemoryHome{}); err == nil {
+		t.Fatal("fresh bootstrap overwrote existing session")
+	}
+}
+
 func TestRuntimeHomeRejectsUnsafeContainerCapture(t *testing.T) {
 	for _, kind := range []string{"symlink", "hardlink", "directory", "outside", "extra", "permissions", "oversized"} {
 		t.Run(kind, func(t *testing.T) {

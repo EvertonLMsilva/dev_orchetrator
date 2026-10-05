@@ -1,13 +1,144 @@
 package infrastructure
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"reflect"
+	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
+
+	"github.com/moby/moby/api/types/mount"
+	"github.com/moby/moby/client"
 
 	"dev-orchestrator/internal/ports"
 )
+
+func TestRuntimeHomeDockerFailClosedPolicy(t *testing.T) {
+	for _, hosts := range []string{"", "chatgpt.com", "auth.openai.com", "auth.openai.com,chatgpt.com,third.invalid", "*.openai.com,chatgpt.com"} {
+		if c, err := NewRuntimeHomeDockerContainer(hosts); err == nil || c != nil {
+			t.Fatal("unapproved hosts accepted")
+		}
+	}
+	opts := runtimeHomeCreateOptions("owned-private")
+	if opts.Config.Image != "dev-orchestrator-codex-runtime:0.159.2" || opts.HostConfig.NetworkMode != "owned-private" || opts.HostConfig.Privileged || opts.HostConfig.LogConfig.Type != "none" {
+		t.Fatal("unsafe runtime isolation")
+	}
+	if len(opts.HostConfig.Mounts) != 1 || opts.HostConfig.Mounts[0].Type != mount.TypeTmpfs || opts.HostConfig.Mounts[0].Target != "/run/codex-auth" || opts.HostConfig.Mounts[0].TmpfsOptions.Mode != 0700 {
+		t.Fatal("runtime home mounted outside private tmpfs")
+	}
+	if !reflect.DeepEqual(opts.HostConfig.CapDrop, []string{"ALL"}) || !reflect.DeepEqual(opts.HostConfig.SecurityOpt, []string{"no-new-privileges:true"}) || len(opts.Config.Env) != 0 {
+		t.Fatal("unsafe capabilities or credentials environment")
+	}
+}
+
+type liveAccountSession struct{ request []byte }
+
+func (s *liveAccountSession) Write(b []byte) error { s.request = append([]byte(nil), b...); return nil }
+func (s *liveAccountSession) Read() ([]byte, error) {
+	var req struct {
+		ID any `json:"id"`
+	}
+	json.Unmarshal(s.request, &req)
+	return json.Marshal(map[string]any{"id": req.ID, "result": map[string]any{"account": map[string]any{"type": "chatgpt", "email": "fake@example.invalid", "planType": "plus"}, "requiresOpenaiAuth": true}})
+}
+func (*liveAccountSession) Close() error { return nil }
+func TestRuntimeHomeAccountReadDoesNotRefreshOrInfer(t *testing.T) {
+	s := &liveAccountSession{}
+	kind, _ := ReadRuntimeHomeAccount(context.Background(), s)
+	var req struct {
+		Method string
+		Params map[string]any
+	}
+	if json.Unmarshal(s.request, &req) != nil || req.Method != "account/read" || req.Params["refreshToken"] != false || len(req.Params) != 1 {
+		t.Fatal("unexpected account RPC")
+	}
+	if kind != "pass" {
+		t.Fatal("valid runtime account rejected")
+	}
+}
+
+func TestRuntimeHomeDockerCapturePreservesUntilDestroy(t *testing.T) {
+	var captured, removed atomic.Bool
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/containers/container/exec"):
+			if removed.Load() {
+				t.Error("container destroyed before capture")
+			}
+			var opts client.ExecCreateOptions
+			if json.NewDecoder(r.Body).Decode(&opts) != nil || len(opts.Env) != 0 || opts.AttachStdin || !opts.AttachStdout || !opts.AttachStderr {
+				t.Error("unsafe capture options")
+			}
+			if len(opts.Cmd) != 3 || !strings.Contains(opts.Cmd[2], "test ! -L auth.json") {
+				t.Error("symlink guard missing")
+			}
+			fmt.Fprint(w, `{"Id":"capture"}`)
+		case strings.HasSuffix(r.URL.Path, "/exec/capture/start"):
+			io.Copy(io.Discard, r.Body)
+			conn, rw, err := w.(http.Hijacker).Hijack()
+			if err != nil {
+				t.Error(err)
+				return
+			}
+			defer conn.Close()
+			fmt.Fprint(rw, "HTTP/1.1 101 UPGRADED\r\nContent-Type: application/vnd.docker.raw-stream\r\nConnection: Upgrade\r\nUpgrade: tcp\r\n\r\n")
+			rw.Write(codexDockerFrame(1, "controlled capture archive"))
+			rw.Flush()
+		case strings.HasSuffix(r.URL.Path, "/exec/capture/json"):
+			captured.Store(true)
+			fmt.Fprint(w, `{"Running":false,"ExitCode":0}`)
+		case r.Method == http.MethodDelete && strings.HasSuffix(r.URL.Path, "/containers/container"):
+			if !captured.Load() {
+				t.Error("removed before capture finished")
+			}
+			removed.Store(true)
+			w.WriteHeader(204)
+		default:
+			t.Error("unexpected container lifecycle operation")
+			w.WriteHeader(500)
+		}
+	}))
+	defer server.Close()
+	sdk, err := client.New(client.WithHost("tcp://"+strings.TrimPrefix(server.URL, "http://")), client.WithAPIVersion("1.56"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	d := &DockerDriver{client: sdk}
+	reader, writer := io.Pipe()
+	defer writer.Close()
+	processDriver := leaseProcessDocker{&fakeCodexProcessDocker{output: reader}}
+	process, err := startLeaseCodexProcessRuntime(context.Background(), processDriver, "container")
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := &RuntimeHomeDockerContainer{driver: d, egress: &ownedCodexEgress{DockerDriver: d}, id: "container", process: process}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if process.Close() != nil || removed.Load() {
+		t.Fatal("transport removed container")
+	}
+	stream, err := c.Capture(ctx)
+	if err != nil {
+		t.Fatal("capture failed after transport close")
+	}
+	data, err := io.ReadAll(stream)
+	stream.Close()
+	if err != nil || !bytes.Equal(data, []byte("controlled capture archive")) || removed.Load() {
+		t.Fatal("capture sequence invalid")
+	}
+	if c.Destroy(ctx) != nil || c.Destroy(ctx) != nil || !removed.Load() {
+		t.Fatal("final destruction failed")
+	}
+}
 
 type recordingDocker struct {
 	config                                  DockerEnvironmentConfig

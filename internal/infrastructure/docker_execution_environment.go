@@ -1,15 +1,203 @@
 package infrastructure
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"path"
 	"path/filepath"
 	"strings"
+	"time"
+
+	"github.com/moby/moby/client"
 
 	"dev-orchestrator/internal/ports"
 )
+
+// RuntimeHomeDockerContainer owns one controlled-egress container. Its caller
+// must place it under a RuntimeHomeLease before Prepare or Start. Credentials
+// travel only through bounded stdin/stdout buffers and container tmpfs.
+type RuntimeHomeDockerContainer struct {
+	driver    *DockerDriver
+	egress    *ownedCodexEgress
+	id        string
+	process   *CodexProcessTransport
+	destroyed bool
+}
+
+func (*RuntimeHomeDockerContainer) Format(s fmt.State, _ rune) {
+	io.WriteString(s, "RuntimeHomeDockerContainer[redacted]")
+}
+
+func NewRuntimeHomeDockerContainer(hosts string) (*RuntimeHomeDockerContainer, error) {
+	if hosts != "auth.openai.com,chatgpt.com" && hosts != "chatgpt.com,auth.openai.com" {
+		return nil, errors.New("approved explicit device login hosts required")
+	}
+	d, err := NewDockerDriver()
+	if err != nil {
+		return nil, errors.New("runtime Docker unavailable")
+	}
+	return &RuntimeHomeDockerContainer{driver: d}, nil
+}
+
+func (c *RuntimeHomeDockerContainer) Prepare(ctx context.Context, archive io.Reader) error {
+	if c == nil || c.driver == nil || c.egress != nil || c.destroyed {
+		return errors.New("runtime preparation rejected")
+	}
+	owned, err := c.driver.prepareCodexEgress(ctx, []string{"auth.openai.com", "chatgpt.com"})
+	if err != nil {
+		return errors.New("runtime egress unavailable")
+	}
+	c.egress = owned.(*ownedCodexEgress)
+	opts := runtimeHomeCreateOptions(c.egress.private)
+	bounded, cancel := context.WithTimeout(ctx, dockerOperationTimeout)
+	defer cancel()
+	created, err := c.driver.client.ContainerCreate(bounded, opts)
+	c.id = created.ID
+	if err != nil || c.id == "" || c.driver.Start(bounded, c.id) != nil {
+		return errors.New("runtime creation failed")
+	}
+	data, err := io.ReadAll(io.LimitReader(archive, 1024*1024+8193))
+	defer clear(data)
+	if err != nil || len(data) > 1024*1024+8192 {
+		return errors.New("runtime preparation limit")
+	}
+	_, err = c.fixedExec(bounded, []string{"/bin/tar", "--extract", "--file=-", "--directory=/run/codex-auth", "--no-same-owner"}, data, false)
+	return err
+}
+
+func runtimeHomeCreateOptions(private string) client.ContainerCreateOptions {
+	opts := authenticatedCodexCreateOptions(DockerEnvironmentConfig{workspace: "/workspace", authTmpfs: true}, private)
+	// Device login/account read require no host workspace or credential mounts.
+	opts.HostConfig.Mounts = opts.HostConfig.Mounts[1:]
+	opts.HostConfig.LogConfig.Type = "none"
+	opts.Config.Cmd = []string{"/bin/sleep", "1200"}
+	return opts
+}
+
+// Start cannot read desktop auth, initialize RPC, start login or run inference.
+func (c *RuntimeHomeDockerContainer) Start(ctx context.Context) (CodexExecutorSession, error) {
+	if c == nil || c.destroyed || c.id == "" || c.process != nil {
+		return nil, errors.New("runtime process rejected")
+	}
+	version, err := c.fixedExec(ctx, []string{"codex", "--version"}, nil, true)
+	defer clear(version)
+	if err != nil || strings.TrimSpace(string(version)) != "codex-cli 0.159.2" {
+		return nil, errors.New("runtime version rejected")
+	}
+	c.process, err = startLeaseCodexProcessRuntime(ctx, c.egress, c.id)
+	return c.process, err
+}
+
+func (c *RuntimeHomeDockerContainer) Capture(ctx context.Context) (io.ReadCloser, error) {
+	if c == nil || c.destroyed || c.process == nil || c.process.Close() != nil {
+		return nil, errors.New("runtime capture rejected")
+	}
+	data, err := c.fixedExec(ctx, []string{"/bin/sh", "-ec", `cd /run/codex-auth; test ! -L auth.json; test -f auth.json; test "$(stat -c %a auth.json)" = 600; exec tar --format=ustar -cf - auth.json`}, nil, true)
+	if err != nil {
+		clear(data)
+		return nil, errors.New("runtime capture failed")
+	}
+	return &runtimeCaptureReader{Reader: bytes.NewReader(data), data: data}, nil
+}
+
+type runtimeCaptureReader struct {
+	*bytes.Reader
+	data []byte
+}
+
+func (r *runtimeCaptureReader) Close() error { clear(r.data); r.data = nil; return nil }
+
+// Destroy is idempotent and called only by the lease, also on partial failures.
+func (c *RuntimeHomeDockerContainer) Destroy(ctx context.Context) error {
+	if c == nil || c.destroyed {
+		return nil
+	}
+	var err error
+	if c.process != nil {
+		err = c.process.Close()
+	}
+	if c.egress != nil {
+		err = errors.Join(err, c.egress.Remove(ctx, c.id))
+	}
+	if c.driver != nil {
+		err = errors.Join(err, c.driver.Close())
+	}
+	if err != nil {
+		return errors.New("runtime cleanup failed")
+	}
+	c.destroyed = true
+	return nil
+}
+
+// Unknown destinations remain denied; only already-sanitized hostname leaves.
+func (c *RuntimeHomeDockerContainer) DeniedHost(ctx context.Context) string {
+	if c == nil || c.egress == nil || c.destroyed {
+		return ""
+	}
+	return c.egress.blockedDestination(ctx)
+}
+
+type boundedRuntimeOutput struct{ bytes.Buffer }
+
+func (b *boundedRuntimeOutput) Write(p []byte) (int, error) {
+	if b.Len()+len(p) > 1024*1024+8192 {
+		return 0, errors.New("runtime output limit")
+	}
+	return b.Buffer.Write(p)
+}
+
+func (c *RuntimeHomeDockerContainer) fixedExec(ctx context.Context, cmd []string, input []byte, retain bool) ([]byte, error) {
+	ctx, cancel := context.WithTimeout(ctx, dockerOperationTimeout)
+	defer cancel()
+	created, err := c.driver.client.ExecCreate(ctx, c.id, client.ExecCreateOptions{Cmd: cmd, AttachStdin: input != nil, AttachStdout: true, AttachStderr: true})
+	if err != nil {
+		return nil, errors.New("runtime exec failed")
+	}
+	attached, err := c.driver.client.ExecAttach(ctx, created.ID, client.ExecAttachOptions{})
+	if err != nil {
+		return nil, errors.New("runtime attach failed")
+	}
+	defer attached.Close()
+	stop := context.AfterFunc(ctx, attached.Close)
+	defer stop()
+	attached.Conn.SetDeadline(time.Now().Add(dockerOperationTimeout))
+	if input != nil {
+		if n, e := attached.Conn.Write(input); e != nil || n != len(input) {
+			return nil, errors.New("runtime stdin failed")
+		}
+		if attached.CloseWrite() != nil {
+			return nil, errors.New("runtime stdin close failed")
+		}
+	}
+	var output boundedRuntimeOutput
+	var destination io.Writer = io.Discard
+	if retain {
+		destination = &output
+	}
+	err = copyCodexProcessStdout(destination, attached.Reader)
+	if !errors.Is(err, io.EOF) || c.driver.waitAuthExec(ctx, created.ID) != nil {
+		clear(output.Bytes())
+		return nil, errors.New("runtime exec unconfirmed")
+	}
+	return output.Bytes(), nil
+}
+
+// Exposes only the existing account classifier. Raw errors and account identity
+// never cross this administrative boundary.
+func ReadRuntimeHomeAccount(ctx context.Context, session CodexExecutorSession) (string, *int64) {
+	err := requireCodexChatGPTAccount(codexContextTransport{ctx: ctx, session: session})
+	if err == nil {
+		return "pass", nil
+	}
+	var diagnostic *CodexAccountReadError
+	if errors.As(err, &diagnostic) && diagnostic.Kind == "workspace_routing" {
+		return "workspace_routing", diagnostic.RPCCode
+	}
+	return "account_unavailable", nil
+}
 
 // DockerEnvironmentConfig describes the only authorized bind mount. It has no
 // caller-controlled command, additional mounts or privilege settings.

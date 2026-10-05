@@ -42,7 +42,7 @@ var (
 // Destroy destroys the owned tmpfs even after partial preparation. Methods must
 // honor context and must not retain buffers. Destroy stops/removes the owned
 // container resources; Finish must precede external container removal.
-// Concrete driver/production composition is deliberately a subsequent increment.
+// The device-login harness composes the infrastructure-owned Docker driver.
 type RuntimeHomeContainer interface {
 	Prepare(context.Context, io.Reader) error
 	Capture(context.Context) (io.ReadCloser, error)
@@ -308,6 +308,28 @@ type RuntimeHomeLease struct {
 }
 
 func (*RuntimeHomeLease) Format(s fmt.State, _ rune) { io.WriteString(s, "RuntimeHomeLease[redacted]") }
+
+// Bootstrap creates a config-only materialization for an explicitly initiated
+// fresh runtime login. Existing authoritative sessions are never overwritten.
+// The lease holds exclusion through validation, persistence and final cleanup.
+func (s *CodexRuntimeHome) Bootstrap(ctx context.Context, c RuntimeHomeContainer) (*RuntimeHomeLease, error) {
+	if c == nil {
+		return nil, ErrRuntimeHomePreparation
+	}
+	if err := s.acquire(ctx); err != nil {
+		return nil, err
+	}
+	l := &RuntimeHomeLease{store: s, container: c}
+	if _, err := s.root.Lstat("auth.json"); !errors.Is(err, os.ErrNotExist) {
+		return nil, errors.Join(ErrRuntimeAuthUnavailable, l.Abort(context.Background()))
+	}
+	delivery, err := runtimeMaterialArchive(nil)
+	defer clear(delivery)
+	if err != nil || c.Prepare(ctx, bytes.NewReader(delivery)) != nil || ctx.Err() != nil {
+		return nil, errors.Join(ErrRuntimeHomePreparation, l.Abort(context.Background()))
+	}
+	return l, nil
+}
 func (s *CodexRuntimeHome) Materialize(ctx context.Context, c RuntimeHomeContainer) (*RuntimeHomeLease, error) {
 	if c == nil {
 		return nil, ErrRuntimeHomePreparation
@@ -398,6 +420,9 @@ func runtimeMaterialArchive(auth []byte) ([]byte, error) {
 		name string
 		data []byte
 	}{{"auth.json", auth}, {"config.toml", []byte(runtimeHomeConfig)}} {
+		if file.name == "auth.json" && auth == nil {
+			continue
+		}
 		if w.WriteHeader(&tar.Header{Name: file.name, Mode: 0600, Size: int64(len(file.data)), Typeflag: tar.TypeReg, Format: tar.FormatUSTAR}) != nil {
 			clear(buf.Bytes())
 			return nil, ErrRuntimeHomePreparation
