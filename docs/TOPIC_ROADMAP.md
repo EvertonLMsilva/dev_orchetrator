@@ -77,6 +77,12 @@ Validação Linux/Docker: testes completos/focados, vet, build, race,
 Sincronização documental P4 concluída conforme `docs/tasks/P4.md`.
 P5 é somente NEXT; nenhuma implementação de Orquestração neste fechamento.
 
+Final Pre-PR Review após P4.6.5–P4.6.7: `STATUS=DONE`,
+`P4 technical review=PASS`, `F1=RESOLVED`, `F2=RESOLVED`, `F3=RESOLVED`,
+`FINDINGS=none`. Histórico das correções e validações em `docs/tasks/P4.md`.
+P4 permanece DONE; P5 permanece NEXT. Validação live autenticada permanece
+BLOCKED; `B-P4-001=OPEN`, `TD-P4-001=OPEN`, `B-P4-002=NOT_NEEDED`.
+
 ## Dependência
 
 `P0 → P1/P2 → P3 → P4 → P5 → P6/P7 → P8 → P9`
