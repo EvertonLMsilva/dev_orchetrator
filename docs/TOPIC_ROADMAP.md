@@ -100,3 +100,21 @@ antecipadamente API, SDK, CLI, app-server, exec-server, autenticação, sessão 
 
 Executar somente a menor task desbloqueada. Detalhes estão em
 `docs/tasks/P*.md`.
+
+## Fechamento P5 — estado atual
+
+Esta atualização substitui o estado histórico P5=NEXT acima.
+
+| Escopo | Estado |
+| --- | --- |
+| P5 application orchestration (P5.1a/b/c, P5.2a) | DONE |
+| Production authenticated runtime / Discord operational composition | BLOCKED — B-P5-001 |
+
+Production composition blocked by B-P5-001. Registro único do blocker,
+causa raiz, cobertura integrada e limites do fechamento em `docs/tasks/P5.md`.
+B-P4-001 permanece relacionado; não há Planner fake em produção nem fallback de auth.
+
+Próximo tópico recomendado: **P6 — Authenticated Provider Runtime**.
+Fonte ChatGPT autorizada → app-server autenticado → Planner concreto → composition
+root → Discord operacional E2E. A prioridade/numeração do tópico Git histórico
+fica para o Planner. Nenhum runtime autenticado foi implementado neste fechamento.
