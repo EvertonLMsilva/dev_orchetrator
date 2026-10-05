@@ -380,15 +380,15 @@ func TestDeviceCodeLoginRPCShape(t *testing.T) {
 	}
 }
 
-func TestDeviceCodeShapeBeforeResponseDoesNotFixReader(t *testing.T) {
+func TestDeviceCodeShapeBeforeResponse(t *testing.T) {
 	f := session(`{"method":"configWarning","params":{"summary":"SECRET"}}`, attemptResponse)
 	b := NewDeviceCodeBootstrap(f, time.Minute)
-	if _, err := b.Start(context.Background()); err == nil {
-		t.Fatal("diagnostics changed notification policy")
+	if _, err := b.Start(context.Background()); err != nil {
+		t.Fatal("valid notification prevented correlated response")
 	}
 	lines := strings.Join(b.Diagnostics().Lines(), "\n")
-	if !strings.Contains(lines, "message_kind=notification") || strings.Contains(lines, "SECRET") || len(f.messages) != 1 {
-		t.Fatal("notification failure shape missing")
+	if !strings.Contains(lines, "message_kind=notification") || !strings.Contains(lines, "message_kind=response") || strings.Contains(lines, "SECRET") || len(f.messages) != 0 {
+		t.Fatal("sanitized interleaved shape missing")
 	}
 	b = NewDeviceCodeBootstrap(session(completed, attemptResponse), time.Minute)
 	if _, err := b.Start(context.Background()); err != nil {
@@ -397,6 +397,75 @@ func TestDeviceCodeShapeBeforeResponseDoesNotFixReader(t *testing.T) {
 	lines = strings.Join(b.Diagnostics().Lines(), "\n")
 	if !strings.Contains(lines, "message_kind=notification") || !strings.Contains(lines, "message_kind=response") || strings.Contains(lines, "SECRET") {
 		t.Fatal("interleaved shape not preserved")
+	}
+}
+
+func TestDeviceCodeInterleavedNotifications(t *testing.T) {
+	notification := `{"method":"configWarning","params":{"summary":"SECRET_BODY"},"emittedAtMs":123}`
+	for _, tc := range []struct {
+		name     string
+		messages []string
+	}{
+		{"before", []string{notification, attemptResponse, completed}},
+		{"multiple", []string{notification, notification, attemptResponse, completed}},
+		{"early", []string{notification, completed, notification, attemptResponse}},
+		{"after", []string{attemptResponse, notification, completed}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			b := NewDeviceCodeBootstrap(session(tc.messages...), time.Minute)
+			if _, err := b.Start(context.Background()); err != nil || b.State() != LoginPending {
+				t.Fatal("interleaving prevented pending login")
+			}
+			if c, err := b.Wait(context.Background()); err != nil || !c.Success || b.State() != Authenticated {
+				t.Fatal("interleaving lost completion")
+			}
+			if strings.Contains(fmt.Sprintf("%#v", b.Diagnostics()), "SECRET") {
+				t.Fatal("ignored notification leaked")
+			}
+		})
+	}
+	// Generic notifications never establish authentication or completion.
+	b := NewDeviceCodeBootstrap(session(attemptResponse, notification), time.Minute)
+	b.Start(context.Background())
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
+	defer cancel()
+	if _, err := b.Wait(ctx); err == nil || b.State() != AuthFailed {
+		t.Fatal("generic notification treated as login completion")
+	}
+}
+
+func TestDeviceCodeInterleavingFailClosed(t *testing.T) {
+	for _, wire := range []string{
+		`{"method":"event","id":2,"params":{}}`,
+		`{"method":"event","id":null,"params":{}}`,
+		`{"method":"event","result":null,"params":{}}`,
+		`{"method":"event","error":null,"params":{}}`,
+		`{"method":"event"}`,
+		`{"method":"event","params":null}`,
+		`{"method":"event","params":[]}`,
+		`{"method":"","params":{}}`,
+		`{"method":null,"params":{}}`,
+		`{"method":"event","params":{"key":1,"key":2}}`,
+		`{"method":"event","params":{},"unknown":"SECRET"}`,
+		`{"method":"event","params":{},"emittedAtMs":"SECRET"}`,
+		strings.Replace(attemptResponse, `"id":2`, `"id":9`, 1),
+	} {
+		b := NewDeviceCodeBootstrap(session(wire, attemptResponse), time.Minute)
+		if _, err := b.Start(context.Background()); err == nil || b.State() != AuthFailed {
+			t.Fatal("invalid or uncorrelated envelope accepted")
+		}
+		if strings.Contains(fmt.Sprintf("%#v", b.Diagnostics()), "SECRET") {
+			t.Fatal("rejected envelope leaked")
+		}
+	}
+	messages := make([]string, 128)
+	for i := range messages {
+		messages[i] = `{"method":"event","params":{}}`
+	}
+	f := session(append(messages, attemptResponse)...)
+	b := NewDeviceCodeBootstrap(f, time.Minute)
+	if _, err := b.Start(context.Background()); err == nil || err.Error() != "device code bootstrap: message limit" || len(f.messages) != 1 {
+		t.Fatal("notification flood bypassed message limit")
 	}
 }
 

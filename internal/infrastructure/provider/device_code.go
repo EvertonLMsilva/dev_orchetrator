@@ -419,8 +419,14 @@ func (b *DeviceCodeBootstrap) read(ctx context.Context, id int) (json.RawMessage
 			return nil, b.fail("protocol")
 		}
 		if fields["method"] != nil {
-			if fields["id"] != nil || e.Result != nil || e.Error != nil || e.Method != "account/login/completed" {
+			params := bytes.TrimSpace(e.Params)
+			if fields["id"] != nil || e.Result != nil || e.Error != nil || e.Method == "" || len(params) == 0 || params[0] != '{' {
 				return nil, b.fail("protocol")
+			}
+			// Only structurally valid notifications may interleave. They do not
+			// satisfy a pending response or establish login completion.
+			if e.Method != "account/login/completed" {
+				continue
 			}
 			var c completionWire
 			if strict(e.Params, &c) != nil || c.LoginID == nil || *c.LoginID == "" || c.Success == nil || c.Error == nil || c.Onboarding == nil {
