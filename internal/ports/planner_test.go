@@ -8,7 +8,7 @@ import (
 )
 
 func TestPlannerRequestValidate(t *testing.T) {
-	valid := PlannerRequest{ProjectID: "project", TaskID: "task"}
+	valid := PlannerRequest{ProjectID: "project", TaskID: "task", Context: PlannerContext{Project: domain.Project{ID: "project"}, CurrentTask: domain.Task{ID: "task", ProjectID: "project"}}}
 	if err := valid.Validate(); err != nil {
 		t.Fatal(err)
 	}
@@ -16,6 +16,25 @@ func TestPlannerRequestValidate(t *testing.T) {
 		if !errors.Is(request.Validate(), ErrInvalidPlannerRequest) {
 			t.Fatalf("invalid request accepted: %+v", request)
 		}
+	}
+}
+
+func TestPlannerRequestRoundValidation(t *testing.T) {
+	base := PlannerRequest{ProjectID: "project", TaskID: "task", Context: PlannerContext{Project: domain.Project{ID: "project"}, CurrentTask: domain.Task{ID: "task", ProjectID: "project"}}}
+	for name, change := range map[string]func(*PlannerRequest){
+		"missing context":  func(r *PlannerRequest) { r.Context = PlannerContext{} },
+		"context project":  func(r *PlannerRequest) { r.Context.Project.ID = "other" },
+		"context task":     func(r *PlannerRequest) { r.Context.CurrentTask.ID = "other" },
+		"task project":     func(r *PlannerRequest) { r.Context.CurrentTask.ProjectID = "other" },
+		"invalid evidence": func(r *PlannerRequest) { r.Evidence = []PlannerEvidence{{}} },
+	} {
+		t.Run(name, func(t *testing.T) {
+			r := base
+			change(&r)
+			if r.Validate() == nil {
+				t.Fatal("invalid round accepted")
+			}
+		})
 	}
 }
 

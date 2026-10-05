@@ -19,17 +19,30 @@ var (
 	ErrInvalidPlannerDecision = errors.New("invalid planner decision")
 )
 
-// PlannerRequest carries the identities needed to correlate a decision.
+// PlannerRequest carries the canonical snapshot and validated evidence for the current round.
 type PlannerRequest struct {
 	ProjectID domain.ProjectID
 	TaskID    domain.TaskID
+	Context   PlannerContext
+	Evidence  []PlannerEvidence
+	// UserIntent is the current declarative message; it grants no execution authority.
+	UserIntent string
 }
 
 func (r PlannerRequest) Validate() error {
-	if strings.TrimSpace(string(r.ProjectID)) == "" || strings.TrimSpace(string(r.TaskID)) == "" {
+	if !validPlannerIdentity(r.ProjectID, r.TaskID) || r.Context.Project.ID != r.ProjectID || r.Context.CurrentTask.ID != r.TaskID || r.Context.CurrentTask.ProjectID != r.ProjectID {
 		return ErrInvalidPlannerRequest
 	}
+	for _, evidence := range r.Evidence {
+		if evidence.Validate() != nil || evidence.ProjectID != r.ProjectID || evidence.TaskID != r.TaskID {
+			return ErrInvalidPlannerRequest
+		}
+	}
 	return nil
+}
+
+func validPlannerIdentity(projectID domain.ProjectID, taskID domain.TaskID) bool {
+	return strings.TrimSpace(string(projectID)) != "" && strings.TrimSpace(string(taskID)) != ""
 }
 
 type PlannerDecisionType string
@@ -54,7 +67,7 @@ type PlannerDecision struct {
 }
 
 func (d PlannerDecision) Validate() error {
-	if (PlannerRequest{ProjectID: d.ProjectID, TaskID: d.TaskID}).Validate() != nil || strings.TrimSpace(d.Reason) == "" {
+	if !validPlannerIdentity(d.ProjectID, d.TaskID) || strings.TrimSpace(d.Reason) == "" {
 		return ErrInvalidPlannerDecision
 	}
 	switch d.Type {

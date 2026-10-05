@@ -10,23 +10,16 @@ import (
 
 // BotCommand carries only the existing typed action contract.
 type BotCommand struct{ Action domain.Action }
-type BotResultStatus string
+type BotResultStatus = ports.BotResultStatus
+type BotError = ports.BotError
+type BotResult = ports.BotResult
 
 const (
-	BotResultSuccess          BotResultStatus = "SUCCESS"
-	BotResultBlocked          BotResultStatus = "BLOCKED"
-	BotResultApprovalRequired BotResultStatus = "APPROVAL_REQUIRED"
-	BotResultFailed           BotResultStatus = "FAILED"
+	BotResultSuccess          = ports.BotResultSuccess
+	BotResultBlocked          = ports.BotResultBlocked
+	BotResultApprovalRequired = ports.BotResultApprovalRequired
+	BotResultFailed           = ports.BotResultFailed
 )
-
-// BotError exposes a fixed code, never a dependency's raw error text.
-type BotError struct{ Code string }
-type BotResult struct {
-	ActionType domain.ActionType
-	Status     BotResultStatus
-	Result     *ports.ActionResult
-	Error      *BotError
-}
 
 var ErrInvalidBotCommand = errors.New("invalid BOT_COMMAND")
 
