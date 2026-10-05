@@ -87,6 +87,9 @@ func TestAuthenticatedCodexLiveOptIn(t *testing.T) {
 				code = strconv.FormatInt(*diagnostic.RPCCode, 10)
 			}
 			t.Logf("account_read classification=%s rpc_code=%s safe_message=%s", diagnostic.Kind, code, diagnostic.SafeMessage)
+			if diagnostic.ResponseShape != "" {
+				t.Logf("account_read response_shape=%s", diagnostic.ResponseShape)
+			}
 			if diagnostic.Kind == "workspace_routing" {
 				bP4Status = "REPRODUCED"
 				t.Log("B_P4_001=REPRODUCED rpc=account/read")

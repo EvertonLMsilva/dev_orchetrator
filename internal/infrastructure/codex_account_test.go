@@ -8,6 +8,40 @@ import (
 	"testing"
 )
 
+func TestCodexAccountSafeShape(t *testing.T) {
+	response := `{"id":99,"result":{"account":{"type":"chatgpt","email":"EMAIL_SECRET","planType":"plus"},"requiresOpenaiAuth":true,"workspaceRouting":null,"KEY_SECRET":"VALUE_SECRET"}}`
+	err := requireCodexChatGPTAccount(&threadFake{messages: []string{response}})
+	var diagnostic *CodexAccountReadError
+	if !errors.As(err, &diagnostic) || diagnostic.Kind != "protocol_decode" {
+		t.Fatal("unknown fields accepted")
+	}
+	for _, expected := range []string{"top.id=number", "top.result=object", "result.account=object", "account.email=string", "account.type=string", "account.planType=string", "result.workspaceRouting=null", "result.unknown_fields=present", "top.jsonrpc=absent"} {
+		if !strings.Contains(diagnostic.ResponseShape, expected) {
+			t.Fatalf("missing safe structural field: %s", expected)
+		}
+	}
+	for _, rendered := range []string{diagnostic.ResponseShape, err.Error(), fmt.Sprintf("%#v", err)} {
+		for _, secret := range []string{"EMAIL_SECRET", "KEY_SECRET", "VALUE_SECRET", response} {
+			if strings.Contains(rendered, secret) {
+				t.Fatal("shape leaked value or arbitrary key")
+			}
+		}
+	}
+	for _, tc := range []struct{ response, expected string }{
+		{`{"id":"SECRET_ID","jsonrpc":"SECRET_VERSION","result":{"account":[],"requiresOpenaiAuth":null}}`, "result.account=array"},
+		{`{"id":99,"result":{"account":{"type":"chatgpt","email":false,"planType":"plus"},"requiresOpenaiAuth":true}}`, "account.email=boolean"},
+		{`{"id":99,"result":{"account":{"type":"chatgpt","planType":"plus"},"requiresOpenaiAuth":true}}`, "account.email=absent"},
+		{`{"id":99,"result":{"workspaceRouting":{"backendOrigin":"SECRET_URL","chatgptAccountId":"SECRET_ACCOUNT","accountRoutingOverride":"SECRET_ROUTING"}}}`, "workspaceRouting.chatgptAccountId=string"},
+		{`malformed SECRET_TOKEN`, "shape=invalid_json"},
+		{`{"auth.json":{"tokens":{"access_token":"SECRET_TOKEN"}},"SECRET_KEY":1}`, "top.unknown_fields=present"},
+	} {
+		shape := safeCodexAccountShape([]byte(tc.response))
+		if !strings.Contains(shape, tc.expected) || strings.Contains(shape, "SECRET") || strings.Contains(shape, "access_token") || strings.Contains(shape, "auth.json") {
+			t.Fatal("unsafe or incorrect projection")
+		}
+	}
+}
+
 func TestCodexAccountSafeDiagnostics(t *testing.T) {
 	for _, tc := range []struct {
 		name, response, kind, safe string

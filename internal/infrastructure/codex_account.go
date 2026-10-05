@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"strings"
 )
 
 // CodexAccountReadError contains only classifications, a numeric code and
@@ -13,6 +14,8 @@ type CodexAccountReadError struct {
 	Kind        string
 	RPCCode     *int64
 	SafeMessage string
+	// ResponseShape contains only fixed protocol paths and JSON type names.
+	ResponseShape string
 }
 
 func (e *CodexAccountReadError) Error() string {
@@ -21,6 +24,62 @@ func (e *CodexAccountReadError) Error() string {
 func (e *CodexAccountReadError) Format(s fmt.State, _ rune) { _, _ = io.WriteString(s, e.Error()) }
 func accountReadFailure(kind, message string) *CodexAccountReadError {
 	return &CodexAccountReadError{Kind: kind, SafeMessage: message}
+}
+
+// Never emit arbitrary keys: even a JSON field name can carry a secret.
+// This diagnostic projection does not participate in account authorization.
+func safeCodexAccountShape(data []byte) string {
+	if !json.Valid(data) {
+		return "shape=invalid_json"
+	}
+	var fields []string
+	valueType := func(raw json.RawMessage) string {
+		raw = bytes.TrimSpace(raw)
+		if len(raw) == 0 {
+			return "absent"
+		}
+		switch raw[0] {
+		case '{':
+			return "object"
+		case '[':
+			return "array"
+		case '"':
+			return "string"
+		case 'n':
+			return "null"
+		case 't', 'f':
+			return "boolean"
+		default:
+			return "number"
+		}
+	}
+	project := func(prefix string, raw json.RawMessage, known []string) map[string]json.RawMessage {
+		fields = append(fields, prefix+"="+valueType(raw))
+		var object map[string]json.RawMessage
+		if valueType(raw) != "object" || json.Unmarshal(raw, &object) != nil {
+			return nil
+		}
+		unknown := len(object)
+		for _, name := range known {
+			child, present := object[name]
+			if present {
+				unknown--
+			}
+			fields = append(fields, prefix+"."+name+"="+valueType(child))
+		}
+		presence := "absent"
+		if unknown > 0 {
+			presence = "present"
+		}
+		fields = append(fields, prefix+".unknown_fields="+presence)
+		return object
+	}
+	top := project("top", data, []string{"id", "jsonrpc", "method", "params", "result", "error"})
+	result := project("result", top["result"], []string{"account", "requiresOpenaiAuth", "workspaceRouting"})
+	project("account", result["account"], []string{"type", "email", "planType", "usesCodexManagedCredentials"})
+	project("workspaceRouting", result["workspaceRouting"], []string{"accountRoutingOverride", "backendOrigin", "chatgptAccountId"})
+	project("error", top["error"], []string{"code", "message", "data"})
+	return strings.Join(fields, " ")
 }
 
 func requireCodexChatGPTAccount(transport codexHandshakeTransport) error {
@@ -58,6 +117,9 @@ func requireCodexChatGPTAccount(transport codexHandshakeTransport) error {
 				err = failure
 			}
 		}
+		// Compute shape before clearing bytes; no scalar values or raw JSON
+		// survive in the returned diagnostic.
+		failure.ResponseShape = safeCodexAccountShape(data)
 		clear(data)
 		if err != nil {
 			return failure
