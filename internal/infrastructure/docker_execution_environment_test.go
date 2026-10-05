@@ -1,15 +1,25 @@
 package infrastructure
 
 import (
+	"archive/tar"
+	"bufio"
 	"bytes"
 	"context"
+	"crypto/ed25519"
+	"crypto/rand"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"math/big"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"reflect"
+	"runtime"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -20,6 +30,233 @@ import (
 
 	"dev-orchestrator/internal/ports"
 )
+
+type authenticatedTLSResult struct{ proxy, handshake, chain, hostname string }
+
+func (r authenticatedTLSResult) lines() string {
+	if r.proxy != "PASS" {
+		r.proxy = "FAIL"
+	}
+	if r.handshake != "PASS" {
+		r.handshake = "FAIL"
+	}
+	if r.chain != "PASS" && r.chain != "FAIL" {
+		r.chain = "UNKNOWN"
+	}
+	if r.hostname != "PASS" && r.hostname != "FAIL" {
+		r.hostname = "UNKNOWN"
+	}
+	return "PROXY_CONNECT=" + r.proxy + "\nTLS_HANDSHAKE=" + r.handshake + "\nCERTIFICATE_CHAIN_VALID=" + r.chain + "\nCERTIFICATE_HOSTNAME_VALID=" + r.hostname + "\n"
+}
+
+// Test-only: no HTTP application bytes are sent after CONNECT. A nil root pool
+// uses the workload's system trust store; fixture roots are confined to tests.
+func authenticatedTLSProbe(ctx context.Context, host string, dial func(context.Context) (net.Conn, error), roots *x509.CertPool) authenticatedTLSResult {
+	r := authenticatedTLSResult{"FAIL", "FAIL", "UNKNOWN", "UNKNOWN"}
+	if host != "auth.openai.com" {
+		return r
+	}
+	c, err := dial(ctx)
+	if err != nil {
+		return r
+	}
+	defer c.Close()
+	if deadline, ok := ctx.Deadline(); ok {
+		c.SetDeadline(deadline)
+	}
+	stop := context.AfterFunc(ctx, func() { c.Close() })
+	defer stop()
+	if _, err = io.WriteString(c, "CONNECT auth.openai.com:443 HTTP/1.1\r\nHost: auth.openai.com:443\r\n\r\n"); err != nil {
+		return r
+	}
+	reader := bufio.NewReader(io.LimitReader(c, 8192))
+	response, err := http.ReadResponse(reader, &http.Request{Method: "CONNECT"})
+	if err != nil || response.StatusCode != 200 || reader.Buffered() != 0 {
+		return r
+	}
+	r.proxy = "PASS"
+	tunnel := tls.Client(c, &tls.Config{ServerName: "auth.openai.com", RootCAs: roots, MinVersion: tls.VersionTLS12})
+	if err = tunnel.HandshakeContext(ctx); err != nil {
+		var verification *tls.CertificateVerificationError
+		if errors.As(err, &verification) {
+			var hostname x509.HostnameError
+			if errors.As(verification.Err, &hostname) {
+				r.hostname = "FAIL"
+			} else {
+				r.chain = "FAIL"
+			}
+		}
+		return r
+	}
+	r.handshake = "PASS"
+	r.chain = "PASS"
+	r.hostname = "PASS"
+	return r
+}
+
+func TestAuthenticatedTLSProbeOffline(t *testing.T) {
+	pub, key, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal("fixture failed")
+	}
+	template := &x509.Certificate{SerialNumber: big.NewInt(1), DNSNames: []string{"auth.openai.com"}, NotBefore: time.Now().Add(-time.Hour), NotAfter: time.Now().Add(time.Hour), KeyUsage: x509.KeyUsageDigitalSignature, ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth}}
+	der, err := x509.CreateCertificate(rand.Reader, template, template, pub, key)
+	if err != nil {
+		t.Fatal("fixture failed")
+	}
+	certificate := tls.Certificate{Certificate: [][]byte{der}, PrivateKey: key}
+	wrongTemplate := *template
+	wrongTemplate.DNSNames = []string{"wrong.invalid"}
+	wrongDER, err := x509.CreateCertificate(rand.Reader, &wrongTemplate, &wrongTemplate, pub, key)
+	if err != nil {
+		t.Fatal("fixture failed")
+	}
+	for _, tc := range []struct {
+		name, reply, host string
+		roots             bool
+		want              authenticatedTLSResult
+	}{
+		{"connect-denied", "HTTP/1.1 403 Forbidden\r\n\r\n", "auth.openai.com", false, authenticatedTLSResult{"FAIL", "FAIL", "UNKNOWN", "UNKNOWN"}},
+		{"tls-failure", "HTTP/1.1 200 Connection established\r\n\r\n", "auth.openai.com", false, authenticatedTLSResult{"PASS", "FAIL", "FAIL", "UNKNOWN"}},
+		{"hostname-failure", "HTTP/1.1 200 Connection established\r\n\r\n", "auth.openai.com", true, authenticatedTLSResult{"PASS", "FAIL", "UNKNOWN", "FAIL"}},
+		{"success", "HTTP/1.1 200 Connection established\r\n\r\n", "auth.openai.com", true, authenticatedTLSResult{"PASS", "PASS", "PASS", "PASS"}},
+		{"tls-disconnected", "HTTP/1.1 200 Connection established\r\n\r\n", "auth.openai.com", true, authenticatedTLSResult{"PASS", "FAIL", "UNKNOWN", "UNKNOWN"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			certificate := certificate
+			if tc.name == "hostname-failure" {
+				certificate.Certificate = [][]byte{wrongDER}
+			}
+			client, server := net.Pipe()
+			done := make(chan bool, 1)
+			go func() {
+				defer server.Close()
+				server.SetDeadline(time.Now().Add(time.Second))
+				br := bufio.NewReader(server)
+				req, err := http.ReadRequest(br)
+				if err != nil || req.Method != "CONNECT" || req.Host != "auth.openai.com:443" {
+					done <- false
+					return
+				}
+				io.WriteString(server, tc.reply)
+				if tc.name != "connect-denied" && tc.name != "tls-disconnected" {
+					tunnel := tls.Server(server, &tls.Config{Certificates: []tls.Certificate{certificate}})
+					if err := tunnel.Handshake(); err == nil {
+						// The successful client must close without HTTP/application data.
+						var application [1]byte
+						if n, err := tunnel.Read(application[:]); n != 0 || err != io.EOF {
+							done <- false
+							return
+						}
+					}
+				}
+				done <- true
+			}()
+			var roots *x509.CertPool
+			if tc.roots {
+				roots = x509.NewCertPool()
+				leaf, _ := x509.ParseCertificate(certificate.Certificate[0])
+				roots.AddCert(leaf)
+			} else {
+				roots = x509.NewCertPool()
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+			defer cancel()
+			r := authenticatedTLSProbe(ctx, tc.host, func(context.Context) (net.Conn, error) { return client, nil }, roots)
+			if r != tc.want || !<-done {
+				t.Fatal("incorrect sanitized TLS classification")
+			}
+		})
+	}
+	called := false
+	r := authenticatedTLSProbe(context.Background(), "third.invalid", func(context.Context) (net.Conn, error) { called = true; return nil, errors.New("SECRET") }, nil)
+	if called || strings.Contains(r.lines(), "SECRET") {
+		t.Fatal("policy or redaction failure")
+	}
+	if strings.Contains((authenticatedTLSResult{"SECRET", "SECRET", "SECRET", "SECRET"}).lines(), "SECRET") {
+		t.Fatal("unallowlisted diagnostic")
+	}
+}
+
+func TestAuthenticatedTLSWorkloadHelper(t *testing.T) {
+	if os.Getenv("P6_TLS_WORKLOAD_HELPER") != "1" {
+		t.Skip("internal workload helper")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	dial := func(ctx context.Context) (net.Conn, error) {
+		return (&net.Dialer{}).DialContext(ctx, "tcp", "codex-egress:8888")
+	}
+	if os.Getenv("HTTPS_PROXY") != codexProxyURL {
+		fmt.Print((authenticatedTLSResult{"FAIL", "FAIL", "UNKNOWN", "UNKNOWN"}).lines())
+		os.Exit(0)
+	}
+	fmt.Print(authenticatedTLSProbe(ctx, "auth.openai.com", dial, nil).lines())
+	os.Exit(0)
+}
+
+func TestAuthenticatedTLSLiveOptIn(t *testing.T) {
+	if os.Getenv("DEV_ORCHESTRATOR_CODEX_TLS_LIVE") != "1" {
+		t.Skip("explicit TLS diagnostic opt-in required")
+	}
+	if runtime.GOOS != "linux" {
+		t.Fatal("Linux required")
+	}
+	c, err := NewRuntimeHomeDockerContainer(os.Getenv("DEV_ORCHESTRATOR_CODEX_AUTH_HOSTS"))
+	if err != nil {
+		t.Fatal("approved hosts required")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	defer c.Destroy(context.Background())
+	var empty bytes.Buffer
+	tw := tar.NewWriter(&empty)
+	tw.Close()
+	if c.Prepare(ctx, &empty) != nil {
+		t.Fatal("workload preparation failed")
+	}
+	// Copy this test executable into the owned workload, never desktop material.
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal("probe executable unavailable")
+	}
+	data, err := os.ReadFile(executable)
+	if err != nil {
+		t.Fatal("probe executable unavailable")
+	}
+	var archive bytes.Buffer
+	writer := tar.NewWriter(&archive)
+	writer.WriteHeader(&tar.Header{Name: "p6-tls-probe", Mode: 0700, Size: int64(len(data))})
+	writer.Write(data)
+	writer.Close()
+	if _, err = c.fixedExec(ctx, []string{"/bin/tar", "-xf", "-", "-C", "/tmp"}, archive.Bytes(), false); err != nil {
+		t.Fatal("probe preparation failed")
+	}
+	output, err := c.fixedExec(ctx, []string{"/bin/sh", "-c", "HTTPS_PROXY=http://codex-egress:8888 P6_TLS_WORKLOAD_HELPER=1 /tmp/p6-tls-probe -test.run '^TestAuthenticatedTLSWorkloadHelper$'"}, nil, true)
+	if err != nil {
+		t.Fatal("probe execution failed")
+	}
+	// Reject all unexpected output without printing it.
+	valid := false
+	for _, p := range []string{"PASS", "FAIL"} {
+		for _, h := range []string{"PASS", "FAIL"} {
+			for _, ch := range []string{"PASS", "FAIL", "UNKNOWN"} {
+				for _, hn := range []string{"PASS", "FAIL", "UNKNOWN"} {
+					if string(output) == (authenticatedTLSResult{p, h, ch, hn}).lines() {
+						valid = true
+					}
+				}
+			}
+		}
+	}
+	if !valid {
+		t.Fatal("probe output rejected")
+	}
+	fmt.Print(string(output))
+	if !strings.Contains(string(output), "TLS_HANDSHAKE=PASS\n") {
+		t.Fail()
+	}
+}
 
 func TestRuntimeHomeDockerFailClosedPolicy(t *testing.T) {
 	for _, hosts := range []string{"", "chatgpt.com", "auth.openai.com", "auth.openai.com,chatgpt.com,third.invalid", "*.openai.com,chatgpt.com"} {
