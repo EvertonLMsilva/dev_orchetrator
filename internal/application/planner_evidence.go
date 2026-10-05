@@ -40,9 +40,7 @@ func ConsumePlannerEvidence(e domain.Envelope, expected PlannerEvidenceExpectati
 		strings.TrimSpace(string(expected.CorrelationID)) == "" || strings.TrimSpace(expected.ProtocolVersion) == "" {
 		return PlannerEvidence{}, ErrInvalidPlannerEvidence
 	}
-	switch expected.EvidenceKind {
-	case domain.ActionTypeSearch, domain.ActionTypeReadFile, domain.ActionTypeGitStatus, domain.ActionTypeGitDiff, domain.ActionTypeRunTests:
-	default:
+	if !validPlannerEvidenceKind(expected.EvidenceKind) {
 		return PlannerEvidence{}, ErrInvalidPlannerEvidence
 	}
 	if e.Validate() != nil || e.MessageType != domain.MessageTypeBotResult || e.ProtocolVersion != expected.ProtocolVersion ||
@@ -60,16 +58,42 @@ func ConsumePlannerEvidence(e domain.Envelope, expected PlannerEvidenceExpectati
 	if !ok || result.ActionType != expected.EvidenceKind {
 		return PlannerEvidence{}, ErrInvalidPlannerEvidence
 	}
+	evidence := PlannerEvidence{ProjectID: e.ProjectID, TaskID: *e.TaskID, CorrelationID: e.CorrelationID, BotResult: result}
+	if err := evidence.Validate(); err != nil {
+		return PlannerEvidence{}, err
+	}
+	return evidence, nil
+}
+
+// Validate rechecks evidence structure without replacing the expectation and
+// envelope checks required by ConsumePlannerEvidence at the transport boundary.
+func (e PlannerEvidence) Validate() error {
+	if (ports.PlannerRequest{ProjectID: e.ProjectID, TaskID: e.TaskID}).Validate() != nil || strings.TrimSpace(string(e.CorrelationID)) == "" {
+		return ErrInvalidPlannerEvidence
+	}
+	result := e.BotResult
+	if !validPlannerEvidenceKind(result.ActionType) {
+		return ErrInvalidPlannerEvidence
+	}
 	if result.Status == BotResultSuccess {
-		if result.Error != nil || result.Result == nil || result.Result.Validate() != nil || result.Result.Type != expected.EvidenceKind {
-			return PlannerEvidence{}, ErrInvalidPlannerEvidence
+		if result.Error != nil || result.Result == nil || result.Result.Validate() != nil || result.Result.Type != result.ActionType {
+			return ErrInvalidPlannerEvidence
 		}
 	} else {
 		if result.Result != nil || result.Error == nil || !validPlannerEvidenceError(result.Status, result.Error.Code) {
-			return PlannerEvidence{}, ErrInvalidPlannerEvidence
+			return ErrInvalidPlannerEvidence
 		}
 	}
-	return PlannerEvidence{ProjectID: e.ProjectID, TaskID: *e.TaskID, CorrelationID: e.CorrelationID, BotResult: result}, nil
+	return nil
+}
+
+func validPlannerEvidenceKind(kind domain.ActionType) bool {
+	switch kind {
+	case domain.ActionTypeSearch, domain.ActionTypeReadFile, domain.ActionTypeGitStatus, domain.ActionTypeGitDiff, domain.ActionTypeRunTests:
+		return true
+	default:
+		return false
+	}
 }
 
 // These are exactly the safe status/code pairs emitted by LocalAgentTransport.
