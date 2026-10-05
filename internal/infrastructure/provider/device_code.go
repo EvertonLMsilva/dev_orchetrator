@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 	"sync"
 	"time"
@@ -83,6 +84,130 @@ type BootstrapDiagnostics struct {
 	rpcCode        int64
 	hasRPCCode     bool
 	httpStatus     int
+	loginShapes    []LoginRPCShape
+}
+
+// LoginRPCShape retains presence/type/correlation facts only. Arbitrary keys,
+// methods, IDs, URLs and values are never retained, even on malformed messages.
+type LoginRPCShape struct {
+	kind, resultKind, resultType, originValid                            string
+	jsonValid, uniqueFields, hasID, idMatches, typePresent, errorPresent bool
+	fields                                                               [4]bool
+	topUnknown, resultUnknown                                            int
+}
+
+func diagnosticYes(value bool) string {
+	if value {
+		return "yes"
+	}
+	return "no"
+}
+func (s LoginRPCShape) Lines() []string {
+	kind := s.kind
+	switch kind {
+	case "response", "notification", "request":
+	default:
+		kind = "unknown"
+	}
+	result := s.resultKind
+	switch result {
+	case "object", "null", "other":
+	default:
+		result = "missing"
+	}
+	typ := s.resultType
+	switch typ {
+	case "apiKey", "chatgpt", "chatgptDeviceCode", "chatgptAuthTokens", "amazonBedrock":
+	default:
+		typ = "UNKNOWN"
+	}
+	origin := s.originValid
+	if origin != "yes" && origin != "no" {
+		origin = "unknown"
+	}
+	return []string{
+		"message_kind=" + kind + " has_id=" + diagnosticYes(s.hasID) + " id_matches=" + diagnosticYes(s.idMatches),
+		"json_valid=" + diagnosticYes(s.jsonValid) + " unique_fields=" + diagnosticYes(s.uniqueFields),
+		"result_kind=" + result + " result_type_present=" + diagnosticYes(s.typePresent) + " result_type=" + typ + " error_present=" + diagnosticYes(s.errorPresent),
+		"fields_present: type=" + diagnosticYes(s.fields[0]) + " loginId=" + diagnosticYes(s.fields[1]) + " verificationUrl=" + diagnosticYes(s.fields[2]) + " userCode=" + diagnosticYes(s.fields[3]),
+		"verification_url_present=" + diagnosticYes(s.fields[2]) + " verification_url_origin_valid=" + origin,
+		fmt.Sprintf("envelope_unknown_field_count=%d result_unknown_field_count=%d", max(0, s.topUnknown), max(0, s.resultUnknown)),
+	}
+}
+func (s LoginRPCShape) Format(state fmt.State, _ rune) {
+	io.WriteString(state, strings.Join(s.Lines(), "\n"))
+}
+
+func safeLoginRPCShape(data []byte, expectedID int) LoginRPCShape {
+	s := LoginRPCShape{jsonValid: json.Valid(data)}
+	if !s.jsonValid {
+		return s
+	}
+	s.uniqueFields = uniqueValue(json.NewDecoder(bytes.NewReader(data))) == nil
+	var top map[string]json.RawMessage
+	if json.Unmarshal(data, &top) != nil || top == nil {
+		return s
+	}
+	_, s.hasID = top["id"]
+	_, s.errorPresent = top["error"]
+	var id int64
+	s.idMatches = s.hasID && !bytes.Equal(bytes.TrimSpace(top["id"]), []byte("null")) && json.Unmarshal(top["id"], &id) == nil && id == int64(expectedID)
+	var method string
+	methodPresent := json.Unmarshal(top["method"], &method) == nil && method != ""
+	_, resultPresent := top["result"]
+	if methodPresent {
+		if s.hasID {
+			s.kind = "request"
+		} else {
+			s.kind = "notification"
+		}
+	} else if s.hasID && (resultPresent != s.errorPresent) {
+		s.kind = "response"
+	}
+	s.topUnknown = len(top)
+	for _, name := range []string{"id", "method", "params", "result", "error", "emittedAtMs"} {
+		if _, ok := top[name]; ok {
+			s.topUnknown--
+		}
+	}
+	raw := bytes.TrimSpace(top["result"])
+	if !resultPresent {
+		return s
+	}
+	s.resultKind = "other"
+	if bytes.Equal(raw, []byte("null")) {
+		s.resultKind = "null"
+		return s
+	}
+	var result map[string]json.RawMessage
+	if len(raw) == 0 || raw[0] != '{' || json.Unmarshal(raw, &result) != nil {
+		return s
+	}
+	s.resultKind = "object"
+	s.resultUnknown = len(result)
+	for i, name := range []string{"type", "loginId", "verificationUrl", "userCode"} {
+		_, s.fields[i] = result[name]
+		if s.fields[i] {
+			s.resultUnknown--
+		}
+	}
+	s.typePresent = s.fields[0]
+	var typ string
+	if json.Unmarshal(result["type"], &typ) == nil {
+		switch typ {
+		case "apiKey", "chatgpt", "chatgptDeviceCode", "chatgptAuthTokens", "amazonBedrock":
+			s.resultType = typ
+		}
+	}
+	var verificationURL string
+	if json.Unmarshal(result["verificationUrl"], &verificationURL) == nil && !bytes.Equal(bytes.TrimSpace(result["verificationUrl"]), []byte("null")) {
+		s.originValid = "no"
+		parsed, err := url.Parse(verificationURL)
+		if err == nil && parsed.Scheme == "https" && parsed.Host == "auth.openai.com" && parsed.User == nil {
+			s.originValid = "yes"
+		}
+	}
+	return s
 }
 
 func (d BootstrapDiagnostics) Lines() []string {
@@ -107,6 +232,10 @@ func (d BootstrapDiagnostics) Lines() []string {
 	if d.httpStatus >= 100 && d.httpStatus <= 599 {
 		lines = append(lines, fmt.Sprintf("http_status=%d", d.httpStatus))
 	}
+	for i, shape := range d.loginShapes {
+		lines = append(lines, fmt.Sprintf("login_rpc_message_index=%d", i))
+		lines = append(lines, shape.Lines()...)
+	}
 	return lines
 }
 
@@ -116,7 +245,9 @@ func (d BootstrapDiagnostics) Format(s fmt.State, _ rune) {
 func (b *DeviceCodeBootstrap) Diagnostics() BootstrapDiagnostics {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	return b.diagnostic
+	diagnostic := b.diagnostic
+	diagnostic.loginShapes = append([]LoginRPCShape(nil), b.diagnostic.loginShapes...)
+	return diagnostic
 }
 
 func (b *DeviceCodeBootstrap) diagnoseRPC(raw []byte, id int) {
@@ -273,6 +404,9 @@ func (b *DeviceCodeBootstrap) read(ctx context.Context, id int) (json.RawMessage
 		data, err := b.transport.Read(ctx)
 		if err != nil {
 			return nil, b.fail("transport")
+		}
+		if id == 2 && len(b.diagnostic.loginShapes) < 128 {
+			b.diagnostic.loginShapes = append(b.diagnostic.loginShapes, safeLoginRPCShape(data, id))
 		}
 		var e envelope
 		err = strict(data, &e)

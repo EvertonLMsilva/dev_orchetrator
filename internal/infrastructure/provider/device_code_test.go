@@ -217,7 +217,9 @@ func TestDeviceCodeSafeDiagnosticsStages(t *testing.T) {
 		if !strings.Contains(lines, "stage="+tc.stage+" result=FAIL") || !strings.Contains(lines, "classification="+tc.class) {
 			t.Fatal("incorrect sanitized diagnostic")
 		}
-		if strings.Contains(lines, "SECRET") || strings.Contains(lines, "message") || strings.Contains(lines, "token") {
+		// The new structural labels contain "message" but no remote message.
+		withoutMetadataLabels := strings.ReplaceAll(strings.ReplaceAll(lines, "message_kind=", ""), "login_rpc_message_index=", "")
+		if strings.Contains(lines, "SECRET") || strings.Contains(withoutMetadataLabels, "message") || strings.Contains(lines, "token") {
 			t.Fatal("diagnostic leak")
 		}
 		if tc.stage == "INITIALIZE" && strings.Contains(lines, "stage=LOGIN_RPC_START result=PASS") {
@@ -343,6 +345,78 @@ func TestDeviceCodeSafeDiagnosticsDoNotReusePriorSuccess(t *testing.T) {
 	lines := strings.Join(b.Diagnostics().Lines(), "\n")
 	if !strings.Contains(lines, "stage=INITIALIZE result=FAIL") || !strings.Contains(lines, "stage=LOGIN_RPC_START result=UNKNOWN") || !strings.Contains(lines, "stage=DEVICE_CODE_REQUEST result=UNKNOWN") {
 		t.Fatal("prior success reused")
+	}
+}
+
+func TestDeviceCodeLoginRPCShape(t *testing.T) {
+	for _, tc := range []struct{ wire, kind, result, match, typ string }{
+		{attemptResponse, "response", "object", "yes", "chatgptDeviceCode"},
+		{`{"id":9,"result":{"type":"chatgptDeviceCode","loginId":"SECRET","verificationUrl":"https://auth.openai.com/codex/device?SECRET","userCode":"SECRET"}}`, "response", "object", "no", "chatgptDeviceCode"},
+		{`{"id":2,"result":null}`, "response", "null", "yes", "UNKNOWN"},
+		{`{"id":2}`, "unknown", "missing", "yes", "UNKNOWN"},
+		{`{"id":2,"result":{"type":"SECRET_TYPE","SECRET_KEY":"SECRET_BODY"}}`, "response", "object", "yes", "UNKNOWN"},
+		{`{"method":"configWarning","params":{"summary":"SECRET_BODY"}}`, "notification", "missing", "no", "UNKNOWN"},
+		{`{"id":"SECRET_ID","method":"server/request","params":{"token":"SECRET_BODY"}}`, "request", "missing", "no", "UNKNOWN"},
+		{`{"id":2,"error":{"code":-32603,"message":"SECRET_BODY"}}`, "response", "missing", "yes", "UNKNOWN"},
+		{`not-json-SECRET`, "unknown", "missing", "no", "UNKNOWN"},
+	} {
+		shape := safeLoginRPCShape([]byte(tc.wire), 2)
+		lines := strings.Join(shape.Lines(), "\n")
+		for _, want := range []string{"message_kind=" + tc.kind, "result_kind=" + tc.result, "id_matches=" + tc.match, "result_type=" + tc.typ} {
+			if !strings.Contains(lines, want) {
+				t.Fatal("incorrect structural classification")
+			}
+		}
+		if strings.Contains(lines, "SECRET") || strings.Contains(lines, "https://") || strings.Contains(lines, "summary") || strings.Contains(lines, "server/request") {
+			t.Fatal("structural diagnostic exposed values")
+		}
+		if strings.Contains(fmt.Sprintf("%#v", shape), "SECRET") {
+			t.Fatal("shape formatting exposed values")
+		}
+		raw, _ := json.Marshal(shape)
+		if strings.Contains(string(raw), "SECRET") {
+			t.Fatal("shape JSON exposed values")
+		}
+	}
+}
+
+func TestDeviceCodeShapeBeforeResponseDoesNotFixReader(t *testing.T) {
+	f := session(`{"method":"configWarning","params":{"summary":"SECRET"}}`, attemptResponse)
+	b := NewDeviceCodeBootstrap(f, time.Minute)
+	if _, err := b.Start(context.Background()); err == nil {
+		t.Fatal("diagnostics changed notification policy")
+	}
+	lines := strings.Join(b.Diagnostics().Lines(), "\n")
+	if !strings.Contains(lines, "message_kind=notification") || strings.Contains(lines, "SECRET") || len(f.messages) != 1 {
+		t.Fatal("notification failure shape missing")
+	}
+	b = NewDeviceCodeBootstrap(session(completed, attemptResponse), time.Minute)
+	if _, err := b.Start(context.Background()); err != nil {
+		t.Fatal("existing early completion failed")
+	}
+	lines = strings.Join(b.Diagnostics().Lines(), "\n")
+	if !strings.Contains(lines, "message_kind=notification") || !strings.Contains(lines, "message_kind=response") || strings.Contains(lines, "SECRET") {
+		t.Fatal("interleaved shape not preserved")
+	}
+}
+
+func TestDeviceCodeShapeSensitiveFieldPresenceAndOrigin(t *testing.T) {
+	for _, origin := range []struct{ value, want string }{
+		{"https://auth.openai.com/codex/device?SECRET", "yes"},
+		{"https://SECRET@auth.openai.com/codex/device", "no"},
+		{"https://auth.openai.com.SECRET/codex/device", "no"},
+		{"http://auth.openai.com/codex/device", "no"},
+	} {
+		raw, _ := json.Marshal(map[string]any{"id": 2, "result": map[string]any{"type": "chatgptDeviceCode", "loginId": "SECRET_ID", "verificationUrl": origin.value, "userCode": "SECRET_CODE", "SECRET_KEY": "SECRET_VALUE"}})
+		lines := strings.Join(safeLoginRPCShape(raw, 2).Lines(), "\n")
+		for _, want := range []string{"type=yes", "loginId=yes", "verificationUrl=yes", "userCode=yes", "verification_url_origin_valid=" + origin.want, "result_unknown_field_count=1"} {
+			if !strings.Contains(lines, want) {
+				t.Fatal("sensitive field projection incorrect")
+			}
+		}
+		if strings.Contains(lines, "SECRET") || strings.Contains(lines, "https://") {
+			t.Fatal("sensitive values exposed")
+		}
 	}
 }
 
