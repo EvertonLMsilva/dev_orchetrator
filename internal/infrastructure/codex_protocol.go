@@ -11,7 +11,7 @@ import (
 
 // Wire contracts verified against openai/codex rust-v0.159.2:
 // codex-rs/app-server-protocol/schema/{json,typescript}.
-// Thread responses remain identity projections. Turn/item notifications validate
+// Thread responses validate the full contract before identity projection. Turn/item notifications validate
 // the pinned wire contract before retaining only execution/correlation data.
 // This codec neither starts a provider nor normalizes an Executor outcome.
 type CodexMethod string
@@ -153,6 +153,274 @@ type CodexThread struct {
 type CodexThreadStartResponse struct {
 	Thread CodexThread `json:"thread"`
 	Cwd    string      `json:"cwd"`
+}
+
+// Validate provider metadata as data before discarding it. None of the policy,
+// source or path fields below grants authority to the client.
+func (thread *CodexThread) UnmarshalJSON(data []byte) error {
+	var wire struct {
+		ID             string  `json:"id"`
+		SessionID      *string `json:"sessionId"`
+		ForkedFromID   *string `json:"forkedFromId"`
+		ParentThreadID *string `json:"parentThreadId"`
+		Preview        *string `json:"preview"`
+		Ephemeral      *bool   `json:"ephemeral"`
+		Section        *struct {
+			ID         *string `json:"id"`
+			Name       *string `json:"name"`
+			Appearance *struct {
+				Icon  *string `json:"icon"`
+				Color *string `json:"color"`
+			} `json:"appearance"`
+		} `json:"section"`
+		SectionEnteredAt *int64                      `json:"sectionEnteredAt"`
+		ProjectID        codexRequiredNullableString `json:"projectId"`
+		HistoryMode      codexJSONString             `json:"historyMode"`
+		ModelProvider    *string                     `json:"modelProvider"`
+		Model            *string                     `json:"model"`
+		ReasoningEffort  *string                     `json:"reasoningEffort"`
+		CreatedAt        *int64                      `json:"createdAt"`
+		UpdatedAt        *int64                      `json:"updatedAt"`
+		RecencyAt        *int64                      `json:"recencyAt"`
+		Status           *codexThreadStatus          `json:"status"`
+		Path             *string                     `json:"path"`
+		Cwd              string                      `json:"cwd"`
+		CLIVersion       *string                     `json:"cliVersion"`
+		Originator       *string                     `json:"originator"`
+		Source           *codexSessionSource         `json:"source"`
+		ThreadSource     *string                     `json:"threadSource"`
+		AgentNickname    *string                     `json:"agentNickname"`
+		AgentRole        *string                     `json:"agentRole"`
+		GitInfo          *struct {
+			SHA       *string `json:"sha"`
+			Branch    *string `json:"branch"`
+			OriginURL *string `json:"originUrl"`
+		} `json:"gitInfo"`
+		Name  *string                `json:"name"`
+		Turns *codexArray[CodexTurn] `json:"turns"`
+	}
+	wire.HistoryMode = "legacy"
+	if err := decodeCodexStrictObject(data, &wire); err != nil {
+		return err
+	}
+	decoded := CodexThread{ID: wire.ID, Cwd: wire.Cwd}
+	if !validCodexThread(decoded) || wire.SessionID == nil || wire.Preview == nil || wire.Ephemeral == nil ||
+		!wire.ProjectID.present || wire.ModelProvider == nil || wire.CreatedAt == nil || wire.UpdatedAt == nil ||
+		wire.Status == nil || wire.CLIVersion == nil || wire.Source == nil || wire.Turns == nil ||
+		!codexOneOf(string(wire.HistoryMode), "legacy", "paginated") ||
+		(wire.Section != nil && (wire.Section.ID == nil || wire.Section.Name == nil)) {
+		return errors.New("codex protocol: invalid thread")
+	}
+	*thread = decoded
+	return nil
+}
+
+// projectId is required but nullable in the pinned JSON schema.
+type codexRequiredNullableString struct{ present bool }
+
+func (value *codexRequiredNullableString) UnmarshalJSON(data []byte) error {
+	var text *string
+	if err := decodeCodexStrictValue(data, &text); err != nil {
+		return err
+	}
+	value.present = true
+	return nil
+}
+
+type codexThreadStatus struct{}
+
+func (*codexThreadStatus) UnmarshalJSON(data []byte) error {
+	var wire struct {
+		Type        codexJSONString             `json:"type"`
+		ActiveFlags codexArray[codexJSONString] `json:"activeFlags"`
+	}
+	if err := decodeCodexStrictObject(data, &wire); err != nil {
+		return err
+	}
+	if wire.Type == "active" {
+		if wire.ActiveFlags == nil {
+			return errors.New("codex protocol: missing active flags")
+		}
+		for _, flag := range wire.ActiveFlags {
+			if !codexOneOf(string(flag), "waitingOnApproval", "waitingOnUserInput") {
+				return errors.New("codex protocol: invalid active flag")
+			}
+		}
+	} else if !codexOneOf(string(wire.Type), "notLoaded", "idle", "systemError") || wire.ActiveFlags != nil {
+		return errors.New("codex protocol: invalid thread status")
+	}
+	return nil
+}
+
+type codexSessionSource struct{}
+
+func (*codexSessionSource) UnmarshalJSON(data []byte) error {
+	if !codexObject(data) {
+		var name codexJSONString
+		if decodeCodexStrictValue(data, &name) != nil || !codexOneOf(string(name), "cli", "vscode", "exec", "appServer", "unknown") {
+			return errors.New("codex protocol: invalid session source")
+		}
+		return nil
+	}
+	var wire struct {
+		Custom   codexJSONString     `json:"custom"`
+		SubAgent codexSubAgentSource `json:"subAgent"`
+	}
+	// Presence metadata rejects multiple tags, even if one value is null.
+	var tags struct {
+		Custom   json.RawMessage `json:"custom"`
+		SubAgent json.RawMessage `json:"subAgent"`
+	}
+	if decodeCodexStrictObject(data, &tags) != nil || (len(tags.Custom) == 0) == (len(tags.SubAgent) == 0) {
+		return errors.New("codex protocol: invalid session source tags")
+	}
+	return decodeCodexStrictObject(data, &wire)
+}
+
+type codexSubAgentSource struct{}
+
+func (*codexSubAgentSource) UnmarshalJSON(data []byte) error {
+	if !codexObject(data) {
+		var name codexJSONString
+		if decodeCodexStrictValue(data, &name) != nil || !codexOneOf(string(name), "review", "compact", "memory_consolidation") {
+			return errors.New("codex protocol: invalid subagent source")
+		}
+		return nil
+	}
+	var tags struct {
+		Spawn json.RawMessage `json:"thread_spawn"`
+		Other json.RawMessage `json:"other"`
+	}
+	if decodeCodexStrictObject(data, &tags) != nil || (len(tags.Spawn) == 0) == (len(tags.Other) == 0) {
+		return errors.New("codex protocol: invalid subagent source tags")
+	}
+	var wire struct {
+		Spawn *struct {
+			ParentThreadID *string `json:"parent_thread_id"`
+			Depth          *int32  `json:"depth"`
+			AgentPath      *string `json:"agent_path"`
+			AgentNickname  *string `json:"agent_nickname"`
+			AgentRole      *string `json:"agent_role"`
+		} `json:"thread_spawn"`
+		Other codexJSONString `json:"other"`
+	}
+	if err := decodeCodexStrictObject(data, &wire); err != nil {
+		return err
+	}
+	if len(tags.Spawn) != 0 && (wire.Spawn == nil || wire.Spawn.ParentThreadID == nil || wire.Spawn.Depth == nil) {
+		return errors.New("codex protocol: invalid thread spawn source")
+	}
+	return nil
+}
+
+func (response *CodexThreadStartResponse) UnmarshalJSON(data []byte) error {
+	var wire struct {
+		Thread             *CodexThread                `json:"thread"`
+		Model              *string                     `json:"model"`
+		ModelProvider      *string                     `json:"modelProvider"`
+		ServiceTier        *string                     `json:"serviceTier"`
+		DisabledPluginIDs  codexArray[codexJSONString] `json:"disabledPluginIds"`
+		Cwd                string                      `json:"cwd"`
+		InstructionSources codexArray[codexJSONString] `json:"instructionSources"`
+		ApprovalPolicy     *codexApprovalPolicy        `json:"approvalPolicy"`
+		ApprovalsReviewer  codexJSONString             `json:"approvalsReviewer"`
+		Sandbox            *codexSandboxPolicy         `json:"sandbox"`
+		ReasoningEffort    *string                     `json:"reasoningEffort"`
+	}
+	if err := decodeCodexStrictObject(data, &wire); err != nil {
+		return err
+	}
+	if wire.Thread == nil || wire.Model == nil || wire.ModelProvider == nil || wire.Cwd != codexProtocolWorkspace ||
+		wire.ApprovalPolicy == nil || wire.Sandbox == nil || !codexOneOf(string(wire.ApprovalsReviewer), "user", "auto_review", "guardian_subagent") {
+		return errors.New("codex protocol: invalid thread start result")
+	}
+	*response = CodexThreadStartResponse{Thread: *wire.Thread, Cwd: wire.Cwd}
+	return nil
+}
+
+type codexApprovalPolicy struct{}
+
+func (*codexApprovalPolicy) UnmarshalJSON(data []byte) error {
+	if !codexObject(data) {
+		var name codexJSONString
+		if decodeCodexStrictValue(data, &name) != nil || !codexOneOf(string(name), "untrusted", "on-request", "never") {
+			return errors.New("codex protocol: invalid approval policy")
+		}
+		return nil
+	}
+	var wire struct {
+		Granular *struct {
+			SandboxApproval    *bool         `json:"sandbox_approval"`
+			Rules              *bool         `json:"rules"`
+			SkillApproval      codexJSONBool `json:"skill_approval"`
+			RequestPermissions codexJSONBool `json:"request_permissions"`
+			MCPElicitations    *bool         `json:"mcp_elicitations"`
+		} `json:"granular"`
+	}
+	if err := decodeCodexStrictObject(data, &wire); err != nil {
+		return err
+	}
+	if wire.Granular == nil || wire.Granular.SandboxApproval == nil || wire.Granular.Rules == nil || wire.Granular.MCPElicitations == nil {
+		return errors.New("codex protocol: invalid granular approval policy")
+	}
+	return nil
+}
+
+type codexJSONBool bool
+
+func (value *codexJSONBool) UnmarshalJSON(data []byte) error {
+	data = bytes.TrimSpace(data)
+	if !bytes.Equal(data, []byte("true")) && !bytes.Equal(data, []byte("false")) {
+		return errors.New("codex protocol: boolean required")
+	}
+	*value = codexJSONBool(bytes.Equal(data, []byte("true")))
+	return nil
+}
+
+type codexSandboxPolicy struct{}
+
+func (*codexSandboxPolicy) UnmarshalJSON(data []byte) error {
+	var tag struct {
+		Type codexJSONString `json:"type"`
+	}
+	// Discrimination only; the selected variant is strictly decoded below.
+	if !codexObject(data) || json.Unmarshal(data, &tag) != nil {
+		return errors.New("codex protocol: invalid sandbox policy")
+	}
+	switch tag.Type {
+	case "dangerFullAccess":
+		return decodeCodexStrictObject(data, &tag)
+	case "readOnly":
+		var wire struct {
+			Type          codexJSONString `json:"type"`
+			NetworkAccess codexJSONBool   `json:"networkAccess"`
+		}
+		return decodeCodexStrictObject(data, &wire)
+	case "externalSandbox":
+		var wire struct {
+			Type          codexJSONString `json:"type"`
+			NetworkAccess codexJSONString `json:"networkAccess"`
+		}
+		wire.NetworkAccess = "restricted"
+		if err := decodeCodexStrictObject(data, &wire); err != nil {
+			return err
+		}
+		if !codexOneOf(string(wire.NetworkAccess), "restricted", "enabled") {
+			return errors.New("codex protocol: invalid network access")
+		}
+		return nil
+	case "workspaceWrite":
+		var wire struct {
+			Type                codexJSONString             `json:"type"`
+			WritableRoots       codexArray[codexJSONString] `json:"writableRoots"`
+			NetworkAccess       codexJSONBool               `json:"networkAccess"`
+			ExcludeTmpdirEnvVar codexJSONBool               `json:"excludeTmpdirEnvVar"`
+			ExcludeSlashTmp     codexJSONBool               `json:"excludeSlashTmp"`
+		}
+		return decodeCodexStrictObject(data, &wire)
+	default:
+		return errors.New("codex protocol: invalid sandbox policy type")
+	}
 }
 
 type CodexTurnStatus string
@@ -822,8 +1090,11 @@ func DecodeCodexMessage(data []byte, expected *CodexResponseExpectation) (CodexM
 		var detail struct {
 			Code    *int64  `json:"code"`
 			Message *string `json:"message"`
+			// The official schema explicitly permits any JSON in data. Validate
+			// framing, then discard it; never expose it in the projected error.
+			Data json.RawMessage `json:"data"`
 		}
-		if !codexObject(envelope.Error) || json.Unmarshal(envelope.Error, &detail) != nil || detail.Code == nil || detail.Message == nil {
+		if decodeCodexStrictObject(envelope.Error, &detail) != nil || detail.Code == nil || detail.Message == nil {
 			return CodexMessage{}, invalid
 		}
 		return CodexMessage{}, &CodexRPCErrorResponse{id, CodexRPCErrorDetail{*detail.Code, *detail.Message}}
@@ -835,19 +1106,19 @@ func DecodeCodexMessage(data []byte, expected *CodexResponseExpectation) (CodexM
 	switch expected.Method {
 	case CodexInitialize:
 		var result CodexInitializeResponse
-		if json.Unmarshal(envelope.Result, &result) != nil || result.UserAgent == "" || result.CodexHome == "" || result.PlatformFamily == "" || result.PlatformOS == "" {
+		if decodeCodexStrictObject(envelope.Result, &result) != nil || result.UserAgent == "" || result.CodexHome == "" || result.PlatformFamily == "" || result.PlatformOS == "" {
 			return CodexMessage{}, invalid
 		}
 		response.Initialize = &result
 	case CodexThreadStart:
 		var result CodexThreadStartResponse
-		if json.Unmarshal(envelope.Result, &result) != nil || !validCodexThread(result.Thread) || result.Cwd != codexProtocolWorkspace {
+		if decodeCodexStrictObject(envelope.Result, &result) != nil || !validCodexThread(result.Thread) || result.Cwd != codexProtocolWorkspace {
 			return CodexMessage{}, invalid
 		}
 		response.ThreadStart = &result
 	case CodexTurnStart:
 		var result CodexTurnStartResponse
-		if json.Unmarshal(envelope.Result, &result) != nil || !validCodexTurn(result.Turn) || result.Turn.Status != CodexTurnInProgress {
+		if decodeCodexStrictObject(envelope.Result, &result) != nil || !validCodexTurn(result.Turn) || result.Turn.Status != CodexTurnInProgress {
 			return CodexMessage{}, invalid
 		}
 		response.TurnStart = &result
@@ -893,7 +1164,7 @@ func decodeCodexNotification(method CodexMethod, params []byte) (CodexMessage, e
 		notification.ItemCompleted = &event
 	case CodexThreadStarted:
 		var event CodexThreadStartedNotification
-		if json.Unmarshal(params, &event) != nil || !validCodexThread(event.Thread) {
+		if decodeCodexStrictObject(params, &event) != nil || !validCodexThread(event.Thread) {
 			return CodexMessage{}, invalid
 		}
 		notification.ThreadStarted = &event

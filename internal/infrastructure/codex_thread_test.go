@@ -8,8 +8,8 @@ import (
 	"testing"
 )
 
-const threadResponse = `{"id":2,"result":{"thread":{"id":"thread-1","cwd":"/workspace"},"cwd":"/workspace"}}`
-const threadNotification = `{"method":"thread/started","params":{"thread":{"id":"existing","cwd":"/workspace"}}}`
+const threadResponse = `{"id":2,"result":` + officialThreadStartJSON + `}`
+var threadNotification = `{"method":"thread/started","params":{"thread":` + strings.Replace(officialThreadJSON, `"id":"thread-1"`, `"id":"existing"`, 1) + `}}`
 
 type threadFake struct {
 	messages     []string

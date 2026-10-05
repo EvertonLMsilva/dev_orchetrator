@@ -7,6 +7,223 @@ import (
 	"testing"
 )
 
+// Full required fields and optional metadata from the pinned 0.159.2 schema.
+const officialThreadJSON = `{"id":"thread-1","sessionId":"session-1","projectId":null,"preview":"","ephemeral":false,"modelProvider":"openai","createdAt":1,"updatedAt":2,"status":{"type":"idle"},"cwd":"/workspace","cliVersion":"0.159.2","source":"appServer","turns":[]}`
+const officialThreadStartJSON = `{"thread":` + officialThreadJSON + `,"model":"fake","modelProvider":"openai","cwd":"/workspace","approvalPolicy":"never","approvalsReviewer":"user","sandbox":{"type":"dangerFullAccess"}}`
+
+func TestCodexRemainingStrictDecoding(t *testing.T) {
+	initialize := `{"id":1,"result":{"userAgent":"fake","codexHome":"/run/codex-process","platformFamily":"unix","platformOs":"linux"}}`
+	threadStart := `{"id":2,"result":` + officialThreadStartJSON + `}`
+	threadStarted := `{"method":"thread/started","params":{"thread":` + officialThreadJSON + `}}`
+	turnStart := `{"id":3,"result":{"turn":{"id":"turn-1","items":[],"status":"inProgress","error":null}}}`
+	rpc := `{"id":1,"error":{"code":-1,"message":"failure"}}`
+	for _, tc := range []struct {
+		name, input string
+		method      CodexMethod
+		id          int64
+	}{
+		{"initialize_unknown", strings.Replace(initialize, `"userAgent":`, `"unknown":true,"userAgent":`, 1), CodexInitialize, 1},
+		{"thread_start_unknown", strings.Replace(threadStart, `"result":{`, `"result":{"unknown":true,`, 1), CodexThreadStart, 2},
+		{"thread_start_nested_unknown", strings.Replace(threadStart, `"sessionId":`, `"unknown":true,"sessionId":`, 1), CodexThreadStart, 2},
+		{"turn_start_wrapper_unknown", strings.Replace(turnStart, `"result":{`, `"result":{"unknown":true,`, 1), CodexTurnStart, 3},
+		{"turn_start_nested_unknown", strings.Replace(turnStart, `"items":`, `"unknown":true,"items":`, 1), CodexTurnStart, 3},
+		{"thread_started_params_unknown", strings.Replace(threadStarted, `"params":{`, `"params":{"unknown":true,`, 1), "", 0},
+		{"thread_started_thread_unknown", strings.Replace(threadStarted, `"sessionId":`, `"unknown":true,"sessionId":`, 1), "", 0},
+		{"rpc_unknown", strings.Replace(rpc, `"code":`, `"unknown":"credential-secret","code":`, 1), CodexInitialize, 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var expected *CodexResponseExpectation
+			if tc.method != "" {
+				expected = &CodexResponseExpectation{ID: CodexIntegerID(tc.id), Method: tc.method}
+			}
+			if _, err := DecodeCodexMessage([]byte(tc.input), expected); err == nil {
+				t.Fatal("unknown field accepted")
+			} else {
+				var rpc *CodexRPCErrorResponse
+				if tc.name == "rpc_unknown" && errors.As(err, &rpc) {
+					t.Fatal("unknown field accepted as RPC error")
+				}
+				if strings.Contains(err.Error(), "credential-secret") {
+					t.Fatal("error data leaked")
+				}
+			}
+		})
+	}
+}
+
+func TestCodexStrictRequiredResponseFields(t *testing.T) {
+	for _, tc := range []struct {
+		name, payload string
+		method        CodexMethod
+		keys          []string
+	}{
+		{"initialize", `{"userAgent":"fake","codexHome":"/run/codex-process","platformFamily":"unix","platformOs":"linux"}`, CodexInitialize, []string{"userAgent", "codexHome", "platformFamily", "platformOs"}},
+		{"thread_start", officialThreadStartJSON, CodexThreadStart, []string{"thread", "model", "modelProvider", "cwd", "approvalPolicy", "approvalsReviewer", "sandbox"}},
+		{"turn_start", `{"turn":{"id":"turn-1","items":[],"status":"inProgress","error":null}}`, CodexTurnStart, []string{"turn"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			expected := &CodexResponseExpectation{ID: CodexIntegerID(7), Method: tc.method}
+			wrap := func(payload string) []byte { return []byte(`{"id":7,"result":` + payload + `}`) }
+			if _, err := DecodeCodexMessage(wrap(tc.payload), expected); err != nil {
+				t.Fatal("valid official response rejected", err)
+			}
+			var fields map[string]json.RawMessage
+			if err := decodeCodexStrictObject([]byte(tc.payload), &fields); err != nil {
+				t.Fatal(err)
+			}
+			for _, key := range tc.keys {
+				original := fields[key]
+				for _, replacement := range []string{"", "null", "123", "[]"} {
+					if replacement == "" {
+						delete(fields, key)
+					} else {
+						fields[key] = json.RawMessage(replacement)
+					}
+					payload, _ := json.Marshal(fields)
+					if _, err := DecodeCodexMessage(wrap(string(payload)), expected); err == nil {
+						t.Fatalf("accepted invalid required field %s=%s", key, replacement)
+					}
+				}
+				fields[key] = original
+			}
+			for _, bad := range []string{`null`, `[]`, `{`, tc.payload + ` {}`} {
+				if _, err := DecodeCodexMessage(wrap(bad), expected); err == nil {
+					t.Fatal("malformed/trailing result accepted")
+				}
+			}
+		})
+	}
+	for _, notification := range []bool{false, true} {
+		var fields map[string]json.RawMessage
+		if err := decodeCodexStrictObject([]byte(officialThreadJSON), &fields); err != nil {
+			t.Fatal(err)
+		}
+		for _, key := range []string{"id", "sessionId", "projectId", "preview", "ephemeral", "modelProvider", "createdAt", "updatedAt", "status", "cwd", "cliVersion", "source", "turns"} {
+			original := fields[key]
+			for _, replacement := range []string{"", "null", "true", "{}"} {
+				if (key == "projectId" && replacement == "null") || (key == "ephemeral" && replacement == "true") {
+					continue
+				}
+				if replacement == "" {
+					delete(fields, key)
+				} else {
+					fields[key] = json.RawMessage(replacement)
+				}
+				thread, _ := json.Marshal(fields)
+				input := strings.Replace(officialThreadStartJSON, officialThreadJSON, string(thread), 1)
+				expected := &CodexResponseExpectation{ID: CodexIntegerID(2), Method: CodexThreadStart}
+				input = `{"id":2,"result":` + input + `}`
+				if notification {
+					input = `{"method":"thread/started","params":{"thread":` + string(thread) + `}}`
+					expected = nil
+				}
+				if _, err := DecodeCodexMessage([]byte(input), expected); err == nil {
+					t.Fatalf("notification=%v accepted invalid thread %s=%s", notification, key, replacement)
+				}
+			}
+			fields[key] = original
+		}
+	}
+}
+
+func TestCodexStrictOfficialThreadMetadata(t *testing.T) {
+	// All official optional fields remain accepted and discarded. Runtime identity
+	// and cwd remain the only retained fields, regardless of provider metadata.
+	metadata := `,"forkedFromId":null,"parentThreadId":null,"section":{"id":"s","name":"section","appearance":{"icon":"icon","color":"color"}},"sectionEnteredAt":3,"historyMode":"paginated","model":"m","reasoningEffort":"future-effort","recencyAt":4,"path":"/provider/path","originator":"provider","threadSource":"source","agentNickname":"agent","agentRole":"role","gitInfo":{"sha":"sha","branch":"branch","originUrl":"url"},"name":"name"`
+	thread := strings.TrimSuffix(officialThreadJSON, "}") + metadata + "}"
+	result := strings.Replace(officialThreadStartJSON, officialThreadJSON, thread, 1)
+	result = strings.TrimSuffix(result, "}") + `,"serviceTier":"tier","disabledPluginIds":["plugin"],"instructionSources":["/workspace/AGENTS.md"],"reasoningEffort":"effort"}`
+	expected := &CodexResponseExpectation{ID: CodexIntegerID(2), Method: CodexThreadStart}
+	wrap := func(result string) []byte { return []byte(`{"id":2,"result":` + result + `}`) }
+	m, err := DecodeCodexMessage(wrap(result), expected)
+	if err != nil || m.Response.ThreadStart.Thread != (CodexThread{ID: "thread-1", Cwd: "/workspace"}) {
+		t.Fatal("official metadata/projection", err)
+	}
+	for _, change := range [][2]string{
+		{`"icon":"icon"`, `"icon":"icon","unknown":true`},
+		{`"appearance":{`, `"unknown":true,"appearance":{`},
+		{`"sha":"sha"`, `"sha":"sha","unknown":true`},
+		{`"type":"idle"`, `"type":"idle","unknown":true`},
+		{`"type":"idle"`, `"type":"idle","activeFlags":[]`},
+		{`"type":"idle"`, `"type":"active"`},
+		{`"type":"idle"`, `"type":"active","activeFlags":[null]`},
+		{`"type":"idle"`, `"type":"active","activeFlags":["unknown"]`},
+		{`"createdAt":1`, `"createdAt":1.5`},
+		{`"ephemeral":false`, `"ephemeral":0`},
+		{`"historyMode":"paginated"`, `"historyMode":null`},
+		{`"turns":[]`, `"turns":[null]`},
+		{`"turns":[]`, `"turns":[{"id":"u","status":"completed","items":[],"unknown":true}]`},
+		{`"instructionSources":["/workspace/AGENTS.md"]`, `"instructionSources":[null]`},
+		{`"disabledPluginIds":["plugin"]`, `"disabledPluginIds":null`},
+		{`"name":"section"`, `"name":null`},
+	} {
+		if _, err := DecodeCodexMessage(wrap(strings.Replace(result, change[0], change[1], 1)), expected); err == nil {
+			t.Fatal("invalid nested metadata accepted", change[0])
+		}
+	}
+	for _, source := range []string{`"cli"`, `"vscode"`, `"exec"`, `"unknown"`, `{"custom":"client"}`, `{"subAgent":"review"}`, `{"subAgent":"compact"}`, `{"subAgent":"memory_consolidation"}`, `{"subAgent":{"other":"source"}}`, `{"subAgent":{"thread_spawn":{"parent_thread_id":"parent","depth":1,"agent_path":"/agent","agent_nickname":null,"agent_role":null}}}`} {
+		if _, err := DecodeCodexMessage(wrap(strings.Replace(result, `"source":"appServer"`, `"source":`+source, 1)), expected); err != nil {
+			t.Fatal("official source rejected", err)
+		}
+	}
+	for _, source := range []string{`{"custom":null}`, `{"custom":"client","unknown":true}`, `{"custom":"client","subAgent":null}`, `{"subAgent":null}`, `{"subAgent":{"other":null}}`, `{"subAgent":{"thread_spawn":{"parent_thread_id":"p","depth":1,"unknown":true}}}`, `{"subAgent":{"thread_spawn":{"depth":1}}}`, `{"subAgent":{"thread_spawn":null}}`} {
+		if _, err := DecodeCodexMessage(wrap(strings.Replace(result, `"source":"appServer"`, `"source":`+source, 1)), expected); err == nil {
+			t.Fatal("invalid source accepted")
+		}
+	}
+	for _, status := range []string{`{"type":"notLoaded"}`, `{"type":"systemError"}`, `{"type":"active","activeFlags":["waitingOnApproval","waitingOnUserInput"]}`} {
+		if _, err := DecodeCodexMessage(wrap(strings.Replace(result, `{"type":"idle"}`, status, 1)), expected); err != nil {
+			t.Fatal("official status rejected", err)
+		}
+	}
+}
+
+func TestCodexStrictThreadStartPolicyMetadata(t *testing.T) {
+	expected := &CodexResponseExpectation{ID: CodexIntegerID(2), Method: CodexThreadStart}
+	for _, sandbox := range []string{`{"type":"dangerFullAccess"}`, `{"type":"readOnly"}`, `{"type":"readOnly","networkAccess":false}`, `{"type":"externalSandbox"}`, `{"type":"externalSandbox","networkAccess":"enabled"}`, `{"type":"workspaceWrite"}`, `{"type":"workspaceWrite","writableRoots":["/workspace"],"networkAccess":false,"excludeTmpdirEnvVar":true,"excludeSlashTmp":false}`} {
+		for _, approval := range []string{`"never"`, `"untrusted"`, `"on-request"`, `{"granular":{"sandbox_approval":true,"rules":false,"mcp_elicitations":true}}`, `{"granular":{"sandbox_approval":false,"rules":true,"mcp_elicitations":false,"skill_approval":true,"request_permissions":false}}`} {
+			input := strings.Replace(officialThreadStartJSON, `{"type":"dangerFullAccess"}`, sandbox, 1)
+			input = strings.Replace(input, `"approvalPolicy":"never"`, `"approvalPolicy":`+approval, 1)
+			if _, err := DecodeCodexMessage([]byte(`{"id":2,"result":`+input+`}`), expected); err != nil {
+				t.Fatal("official policy metadata rejected", err)
+			}
+		}
+	}
+	for _, change := range [][2]string{
+		{`{"type":"dangerFullAccess"}`, `{"type":"dangerFullAccess","unknown":true}`},
+		{`{"type":"dangerFullAccess"}`, `{"type":"dangerFullAccess","networkAccess":false}`},
+		{`{"type":"dangerFullAccess"}`, `{"type":"readOnly","networkAccess":null}`},
+		{`{"type":"dangerFullAccess"}`, `{"type":"externalSandbox","networkAccess":false}`},
+		{`{"type":"dangerFullAccess"}`, `{"type":"workspaceWrite","writableRoots":[null]}`},
+		{`"approvalPolicy":"never"`, `"approvalPolicy":{"granular":{"sandbox_approval":true,"rules":false,"mcp_elicitations":true,"unknown":true}}`},
+		{`"approvalPolicy":"never"`, `"approvalPolicy":{"granular":{"sandbox_approval":true,"rules":false,"mcp_elicitations":true,"skill_approval":null}}`},
+		{`"approvalPolicy":"never"`, `"approvalPolicy":{"granular":{"rules":false}}`},
+		{`"approvalsReviewer":"user"`, `"approvalsReviewer":"unknown"`},
+	} {
+		if _, err := DecodeCodexMessage([]byte(`{"id":2,"result":`+strings.Replace(officialThreadStartJSON, change[0], change[1], 1)+`}`), expected); err == nil {
+			t.Fatal("invalid policy metadata accepted")
+		}
+	}
+}
+
+func TestCodexStrictRPCErrorProjection(t *testing.T) {
+	expected := &CodexResponseExpectation{ID: CodexIntegerID(1), Method: CodexInitialize}
+	for _, data := range []string{"", `,"data":null`, `,"data":{"detail":"credential-secret","nested":{"opaque":true}}`, `,"data":[1,"credential-secret"]`} {
+		_, err := DecodeCodexMessage([]byte(`{"id":1,"error":{"code":-1,"message":"failure"`+data+`}}`), expected)
+		var rpc *CodexRPCErrorResponse
+		if !errors.As(err, &rpc) || rpc.ErrorDetail != (CodexRPCErrorDetail{Code: -1, Message: "failure"}) || strings.Contains(err.Error(), "credential-secret") {
+			t.Fatal("invalid RPC projection or data leak")
+		}
+	}
+	for _, detail := range []string{`null`, `[]`, `{}`, `{"code":null,"message":"failure"}`, `{"code":1.5,"message":"failure"}`, `{"code":-1,"message":null}`, `{"code":-1,"message":"failure","unknown":true}`, `{"code":-1,"message":"failure"} {}`} {
+		_, err := DecodeCodexMessage([]byte(`{"id":1,"error":`+detail+`}`), expected)
+		var rpc *CodexRPCErrorResponse
+		if err == nil || errors.As(err, &rpc) {
+			t.Fatal("malformed detail accepted as RPC error")
+		}
+	}
+}
+
 func TestCodexProtocolEncode(t *testing.T) {
 	id := CodexIntegerID(7)
 	for _, tc := range []struct {
@@ -139,7 +356,7 @@ func TestCodexProtocolResponses(t *testing.T) {
 		result string
 	}{
 		{CodexInitialize, `{"userAgent":"fake","codexHome":"/tmp/codex","platformFamily":"unix","platformOs":"linux"}`},
-		{CodexThreadStart, `{"thread":{"id":"thread-1","cwd":"/workspace"},"cwd":"/workspace","model":"fake"}`},
+		{CodexThreadStart, officialThreadStartJSON},
 		{CodexTurnStart, `{"turn":{"id":"turn-1","items":[],"status":"inProgress","error":null}}`},
 	} {
 		t.Run(string(tc.method), func(t *testing.T) {
@@ -173,7 +390,7 @@ func TestCodexProtocolNotifications(t *testing.T) {
 		method CodexMethod
 		params string
 	}{
-		{CodexThreadStarted, `{"thread":{"id":"thread-1","cwd":"/workspace"}}`},
+		{CodexThreadStarted, `{"thread":` + officialThreadJSON + `}`},
 		{CodexTurnStarted, `{"threadId":"thread-1","turn":{"id":"turn-1","items":[],"status":"inProgress","error":null}}`},
 		{CodexAgentMessageDelta, `{"threadId":"thread-1","turnId":"turn-1","itemId":"item-1","delta":"hello"}`},
 		{CodexTurnCompleted, `{"threadId":"thread-1","turn":{"id":"turn-1","items":[],"status":"completed","error":null}}`},

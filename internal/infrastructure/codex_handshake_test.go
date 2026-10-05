@@ -41,7 +41,7 @@ func (f *handshakeFake) Read() ([]byte, error) {
 	return []byte(m), nil
 }
 func TestCodexHandshake(t *testing.T) {
-	notification := `{"method":"thread/started","params":{"thread":{"id":"existing","cwd":"/workspace"}}}`
+	notification := threadNotification
 	for _, tc := range []struct {
 		name     string
 		messages []string
@@ -138,7 +138,7 @@ func TestCodexHandshakeFailureClosesRuntime(t *testing.T) {
 func TestCodexHandshakeNotificationLimit(t *testing.T) {
 	f := &handshakeFake{}
 	for i := 0; i < 129; i++ {
-		f.messages = append(f.messages, `{"method":"thread/started","params":{"thread":{"id":"existing","cwd":"/workspace"}}}`)
+		f.messages = append(f.messages, threadNotification)
 	}
 	if _, err := codexHandshake(f); err == nil || len(f.writes) != 1 {
 		t.Fatal("notification flood accepted")
