@@ -87,6 +87,41 @@ func TestCodexProcessSpec(t *testing.T) {
 	}
 }
 
+type leaseProcessDocker struct{ *fakeCodexProcessDocker }
+
+func (d leaseProcessDocker) stopCodexAppServer(ctx context.Context, id, execID string) error {
+	d.record("confirm-app-server-stopped")
+	return d.stopErr
+}
+
+func TestCodexLeaseTransportClosePreservesContainer(t *testing.T) {
+	for _, fail := range []bool{false, true} {
+		reader, writer := io.Pipe()
+		d := leaseProcessDocker{&fakeCodexProcessDocker{output: reader}}
+		if fail {
+			d.stopErr = errors.New("TEST_SECRET_DO_NOT_LEAK")
+		}
+		tr, err := startLeaseCodexProcessRuntime(context.Background(), d, "container")
+		if err != nil {
+			t.Fatal("start failed")
+		}
+		first := tr.Close()
+		second := tr.Close()
+		if (first != nil) != fail || first != second {
+			t.Fatal("non-deterministic close")
+		}
+		if first != nil && strings.Contains(first.Error(), "TEST_SECRET") {
+			t.Fatal("leaked error")
+		}
+		d.mu.Lock()
+		if !reflect.DeepEqual(d.calls, []string{"start", "closeWrite", "confirm-app-server-stopped"}) {
+			t.Error("transport destroyed lease resources")
+		}
+		d.mu.Unlock()
+		writer.Close()
+	}
+}
+
 func TestCodexProcessStartWriteReadFramingAndStderr(t *testing.T) {
 	reader, writer := io.Pipe()
 	d := &fakeCodexProcessDocker{output: reader}

@@ -240,6 +240,55 @@ func TestRuntimeHomeSafeLeaseDiagnosticsAndLifecycle(t *testing.T) {
 		t.Fatal("closed home accepted write")
 	}
 }
+
+// Models the lease driver's stopped-writer boundary; transport ownership itself
+// is exercised in infrastructure's TestCodexLeaseTransportClosePreservesContainer.
+func TestRuntimeHomeCaptureBeforeFinalDestroy(t *testing.T) {
+	for _, failure := range []string{"", "capture", "persistence"} {
+		t.Run(failure, func(t *testing.T) {
+			s := testRuntimeStore(t)
+			ctx := context.Background()
+			if s.StoreSession(ctx, []byte(runtimeAuth)) != nil {
+				t.Fatal("store failed")
+			}
+			m := &memoryRuntimeHome{}
+			lease, err := s.Materialize(ctx, m)
+			if err != nil {
+				t.Fatal("materialization failed")
+			}
+			if m.removed {
+				t.Fatal("materialization destroyed before capture")
+			}
+			updated := strings.Replace(runtimeAuth, "SECRET_REFRESH", "SECRET_UPDATED", 1)
+			m.auth = []byte(updated)
+			if failure == "capture" {
+				m.fail = "capture"
+			}
+			if failure == "persistence" {
+				failRuntimePersistence(s, "replace")
+			}
+			err = lease.Finish(ctx)
+			if (err != nil) != (failure != "") {
+				t.Fatal("capture/persistence result hidden")
+			}
+			if !m.removed {
+				t.Fatal("final destruction missing")
+			}
+			if lease.Abort(ctx) != nil || lease.Abort(ctx) != nil {
+				t.Fatal("double abort failed")
+			}
+			persisted, err := s.read()
+			defer clear(persisted)
+			want := updated
+			if failure != "" {
+				want = runtimeAuth
+			}
+			if err != nil || string(persisted) != want {
+				t.Fatal("authoritative session lost")
+			}
+		})
+	}
+}
 func testRuntimeStore(t *testing.T) *CodexRuntimeHome {
 	t.Helper()
 	path := t.TempDir()

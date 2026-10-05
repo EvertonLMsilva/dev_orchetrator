@@ -45,9 +45,26 @@ type CodexProcessTransport struct {
 	readMu      sync.Mutex
 	closeOnce   sync.Once
 	closeErr    error
+	leaseOwned  bool
+}
+
+type leaseCodexProcessDocker interface {
+	codexProcessDocker
+	stopCodexAppServer(context.Context, string, string) error
+}
+
+// The caller must already own the container through a RuntimeHomeLease. Startup
+// failures and Close leave final destruction to that lease, including failures
+// to confirm process termination. No ownership transfers to the transport.
+func startLeaseCodexProcessRuntime(ctx context.Context, docker leaseCodexProcessDocker, id string) (*CodexProcessTransport, error) {
+	return startOwnedCodexProcessRuntime(ctx, docker, id, true)
 }
 
 func startCodexProcessRuntime(ctx context.Context, docker codexProcessDocker, containerID string) (*CodexProcessTransport, error) {
+	return startOwnedCodexProcessRuntime(ctx, docker, containerID, false)
+}
+
+func startOwnedCodexProcessRuntime(ctx context.Context, docker codexProcessDocker, containerID string, leaseOwned bool) (*CodexProcessTransport, error) {
 	if docker == nil || containerID == "" {
 		return nil, errors.New("codex process requires owned container and driver")
 	}
@@ -59,13 +76,15 @@ func startCodexProcessRuntime(ctx context.Context, docker codexProcessDocker, co
 		cleanup, cancel := context.WithTimeout(context.Background(), dockerOperationTimeout)
 		defer cancel()
 		failure := errors.New("codex process start/attach failed")
-		if err := docker.Remove(cleanup, containerID); err != nil {
-			failure = errors.Join(failure, errors.New("codex process container cleanup failed"))
+		if !leaseOwned {
+			if err := docker.Remove(cleanup, containerID); err != nil {
+				failure = errors.Join(failure, errors.New("codex process container cleanup failed"))
+			}
 		}
 		return nil, failure
 	}
 	output, writer := io.Pipe()
-	t := &CodexProcessTransport{docker: docker, containerID: containerID, attachment: attachment, output: output, reader: bufio.NewReader(output), pumpDone: make(chan struct{}), closed: make(chan struct{})}
+	t := &CodexProcessTransport{docker: docker, containerID: containerID, attachment: attachment, output: output, reader: bufio.NewReader(output), pumpDone: make(chan struct{}), closed: make(chan struct{}), leaseOwned: leaseOwned}
 	go func() {
 		defer close(t.pumpDone)
 		// stderr is drained and discarded: zero retained diagnostic bytes. This
@@ -153,6 +172,13 @@ func (t *CodexProcessTransport) Close() error {
 		t.attachment.close()
 		_ = t.output.Close()
 		ctx, cancel := context.WithTimeout(context.Background(), dockerOperationTimeout)
+		if t.leaseOwned {
+			if t.docker.(leaseCodexProcessDocker).stopCodexAppServer(ctx, t.containerID, t.attachment.execID) != nil {
+				t.closeErr = errors.Join(t.closeErr, errors.New("codex process termination failed"))
+			}
+			cancel()
+			return
+		}
 		if err := t.docker.stopCodexProcess(ctx, t.containerID, t.attachment.execID); err != nil {
 			t.closeErr = errors.Join(t.closeErr, errors.New("codex process termination failed"))
 		}

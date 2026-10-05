@@ -26,6 +26,33 @@ import (
 
 const codexRuntimeSmokeImage = "dev-orchestrator-codex-runtime:0.159.2"
 
+func TestDockerStopAppServerPreservesContainer(t *testing.T) {
+	for _, running := range []bool{false, true} {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.Method != http.MethodGet || !strings.HasSuffix(r.URL.Path, "/exec/owned-exec/json") {
+				t.Error("stop/remove container forbidden for lease transport")
+				w.WriteHeader(500)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprintf(w, `{"Running":%t,"ExitCode":0}`, running)
+		}))
+		sdk, err := client.New(client.WithHost("tcp://"+strings.TrimPrefix(server.URL, "http://")), client.WithAPIVersion("1.56"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		d := &DockerDriver{client: sdk}
+		ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+		err = d.stopCodexAppServer(ctx, "container", "owned-exec")
+		cancel()
+		if (err != nil) != running {
+			t.Error("process exit not confirmed")
+		}
+		sdk.Close()
+		server.Close()
+	}
+}
+
 func TestDockerCodexSessionFixedOptions(t *testing.T) {
 	for _, workspace := range []string{"/trusted/a", "/trusted/b"} {
 		opts := codexSessionCreateOptions(DockerEnvironmentConfig{workspace: workspace})

@@ -288,6 +288,33 @@ func (d *DockerDriver) stopCodexProcess(ctx context.Context, containerID, execID
 	return nil
 }
 
+// stdin EOF initiates app-server shutdown. Confirm it without stopping the
+// lease-owned container: its tmpfs must survive until capture has completed.
+// Failure is closed; the lease must abort rather than capture a running writer.
+func (d *DockerDriver) stopCodexAppServer(ctx context.Context, containerID, execID string) error {
+	ctx, cancel := context.WithTimeout(ctx, dockerOperationTimeout)
+	defer cancel()
+	if d == nil || d.client == nil || containerID == "" || execID == "" {
+		return errors.New("codex process termination unavailable")
+	}
+	ticker := time.NewTicker(10 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		result, err := d.client.ExecInspect(ctx, execID, client.ExecInspectOptions{})
+		if err != nil {
+			return errors.New("codex process termination unconfirmed")
+		}
+		if !result.Running {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return errors.New("codex process termination timeout")
+		case <-ticker.C:
+		}
+	}
+}
+
 type codexProcessStdin struct{ conn net.Conn }
 
 func (s codexProcessStdin) Write(data []byte) (int, error) {
