@@ -11,8 +11,8 @@ import (
 
 // Wire contracts verified against openai/codex rust-v0.159.2:
 // codex-rs/app-server-protocol/schema/{json,typescript}.
-// Responses/events are projections of the fields needed for correlation and
-// execution status. Ancillary Thread/ThreadItem fields are deliberately omitted.
+// Thread responses remain identity projections. Turn/item notifications validate
+// the pinned wire contract before retaining only execution/correlation data.
 // This codec neither starts a provider nor normalizes an Executor outcome.
 type CodexMethod string
 
@@ -169,9 +169,130 @@ type CodexTurnError struct {
 }
 
 type CodexTurn struct {
-	ID     string          `json:"id"`
-	Status CodexTurnStatus `json:"status"`
-	Error  *CodexTurnError `json:"error"`
+	ID     string            `json:"id"`
+	Status CodexTurnStatus   `json:"status"`
+	Error  *CodexTurnError   `json:"error"`
+	Items  []CodexThreadItem `json:"items"`
+}
+
+func (turn *CodexTurn) UnmarshalJSON(data []byte) error {
+	var wire struct {
+		ID          string             `json:"id"`
+		Status      CodexTurnStatus    `json:"status"`
+		Items       *[]CodexThreadItem `json:"items"`
+		ItemsView   codexJSONString    `json:"itemsView"`
+		Error       *CodexTurnError    `json:"error"`
+		StartedAt   *int64             `json:"startedAt"`
+		CompletedAt *int64             `json:"completedAt"`
+		DurationMs  *int64             `json:"durationMs"`
+	}
+	wire.ItemsView = "full" // Official serde default; items has no default.
+	if err := decodeCodexStrictObject(data, &wire); err != nil {
+		return err
+	}
+	if wire.Items == nil || !codexOneOf(string(wire.ItemsView), "notLoaded", "summary", "full") {
+		return errors.New("codex protocol: invalid turn")
+	}
+	decoded := CodexTurn{ID: wire.ID, Status: wire.Status, Error: wire.Error, Items: *wire.Items}
+	if !validCodexTurn(decoded) {
+		return errors.New("codex protocol: invalid turn")
+	}
+	*turn = decoded
+	return nil
+}
+
+func (detail *CodexTurnError) UnmarshalJSON(data []byte) error {
+	var wire struct {
+		Message           *string         `json:"message"`
+		CodexErrorInfo    *codexErrorInfo `json:"codexErrorInfo"`
+		AdditionalDetails *string         `json:"additionalDetails"`
+		Misalignment      *struct {
+			ErrorType           *string `json:"errorType"`
+			DetailedExplanation *string `json:"detailedExplanation"`
+			Steer               *struct {
+				Message *string `json:"message"`
+			} `json:"steer"`
+		} `json:"misalignment"`
+	}
+	if err := decodeCodexStrictObject(data, &wire); err != nil {
+		return err
+	}
+	if wire.Message == nil || *wire.Message == "" || (wire.Misalignment != nil && wire.Misalignment.Steer != nil && wire.Misalignment.Steer.Message == nil) {
+		return errors.New("codex protocol: invalid turn error")
+	}
+	*detail = CodexTurnError{Message: *wire.Message}
+	return nil
+}
+
+// CodexErrorInfo is a pinned string/object union. Details are validated and
+// discarded; they cannot change the result or initiate a continuation.
+type codexErrorInfo struct{}
+
+func (*codexErrorInfo) UnmarshalJSON(data []byte) error {
+	invalid := errors.New("codex protocol: invalid error info")
+	if !codexObject(data) {
+		var name codexJSONString
+		if json.Unmarshal(data, &name) != nil || !codexOneOf(string(name),
+			"contextWindowExceeded", "sessionBudgetExceeded", "usageLimitExceeded", "rateLimitExceeded",
+			"flexUnavailable", "serverOverloaded", "cyberPolicy", "misalignmentPolicyViolation", "tooManyDenials",
+			"internalServerError", "unauthorized", "badRequest", "threadRollbackFailed", "sandboxError", "other") {
+			return invalid
+		}
+		return nil
+	}
+	// Externally tagged objects have exactly one variant key, including when a
+	// sibling value is null. Raw fields are only discriminator presence metadata;
+	// the selected object is immediately decoded below into the typed contract.
+	var tags struct {
+		HTTPConnectionFailed           json.RawMessage `json:"httpConnectionFailed"`
+		ResponseStreamConnectionFailed json.RawMessage `json:"responseStreamConnectionFailed"`
+		ResponseStreamDisconnected     json.RawMessage `json:"responseStreamDisconnected"`
+		ResponseTooManyFailedAttempts  json.RawMessage `json:"responseTooManyFailedAttempts"`
+		ActiveTurnNotSteerable         json.RawMessage `json:"activeTurnNotSteerable"`
+	}
+	if err := decodeCodexStrictObject(data, &tags); err != nil {
+		return err
+	}
+	keys := 0
+	for _, tag := range []json.RawMessage{tags.HTTPConnectionFailed, tags.ResponseStreamConnectionFailed, tags.ResponseStreamDisconnected, tags.ResponseTooManyFailedAttempts, tags.ActiveTurnNotSteerable} {
+		if len(tag) != 0 {
+			keys++
+		}
+	}
+	if keys != 1 {
+		return invalid
+	}
+	type httpFailure struct {
+		HTTPStatusCode *uint16 `json:"httpStatusCode"`
+	}
+	var wire struct {
+		HTTPConnectionFailed           *httpFailure `json:"httpConnectionFailed"`
+		ResponseStreamConnectionFailed *httpFailure `json:"responseStreamConnectionFailed"`
+		ResponseStreamDisconnected     *httpFailure `json:"responseStreamDisconnected"`
+		ResponseTooManyFailedAttempts  *httpFailure `json:"responseTooManyFailedAttempts"`
+		ActiveTurnNotSteerable         *struct {
+			TurnKind codexJSONString `json:"turnKind"`
+		} `json:"activeTurnNotSteerable"`
+	}
+	if err := decodeCodexStrictObject(data, &wire); err != nil {
+		return err
+	}
+	count := 0
+	for _, failure := range []*httpFailure{wire.HTTPConnectionFailed, wire.ResponseStreamConnectionFailed, wire.ResponseStreamDisconnected, wire.ResponseTooManyFailedAttempts} {
+		if failure != nil {
+			count++
+		}
+	}
+	if wire.ActiveTurnNotSteerable != nil {
+		count++
+		if !codexOneOf(string(wire.ActiveTurnNotSteerable.TurnKind), "review", "compact") {
+			return invalid
+		}
+	}
+	if count != 1 {
+		return invalid
+	}
+	return nil
 }
 
 type CodexTurnStartResponse struct {
@@ -239,6 +360,293 @@ type CodexAgentMessageItem struct {
 	Text string
 }
 
+type CodexItemType string
+
+const (
+	CodexAgentMessageItemType      CodexItemType = "agentMessage"
+	CodexUserMessageItemType       CodexItemType = "userMessage"
+	CodexPlanItemType              CodexItemType = "plan"
+	CodexReasoningItemType         CodexItemType = "reasoning"
+	CodexCommandExecutionItemType  CodexItemType = "commandExecution"
+	CodexFileChangeItemType        CodexItemType = "fileChange"
+	CodexImageViewItemType         CodexItemType = "imageView"
+	CodexSleepItemType             CodexItemType = "sleep"
+	CodexContextCompactionItemType CodexItemType = "contextCompaction"
+)
+
+// Pinned ThreadItem inventory: agentMessage is OUTPUT. userMessage, plan,
+// reasoning, commandExecution, fileChange, imageView, sleep, contextCompaction
+// are LIFECYCLE_ONLY. These are provider data, never instructions for this client.
+// hookPrompt, functionCallOutput, mcpToolCall, dynamicToolCall, collabAgentToolCall,
+// subAgentActivity, webSearch, imageGeneration, enteredReviewMode, exitedReviewMode
+// require unused feature/capability contracts and remain UNSUPPORTED.
+type CodexThreadItem struct {
+	Type CodexItemType
+	ID   string
+	Text string // Only agentMessage snapshots; deltas remain the output source.
+}
+
+type codexItemIdentity struct {
+	Type codexJSONString `json:"type"`
+	ID   codexJSONString `json:"id"`
+}
+
+func (item *CodexThreadItem) UnmarshalJSON(data []byte) error {
+	invalid := errors.New("codex protocol: invalid or unsupported thread item")
+	// This first-stage discriminator is immediately followed by a strict typed
+	// decode of the whole object; no free-form payload is retained.
+	var identity codexItemIdentity
+	if !codexObject(data) || json.Unmarshal(data, &identity) != nil || identity.ID == "" {
+		return invalid
+	}
+	typ := CodexItemType(identity.Type)
+	decoded := CodexThreadItem{Type: typ, ID: string(identity.ID)}
+	switch typ {
+	case CodexAgentMessageItemType:
+		var agent CodexAgentMessageItem
+		if err := json.Unmarshal(data, &agent); err != nil {
+			return err
+		}
+		decoded.Text = agent.Text
+	case CodexPlanItemType:
+		var wire struct {
+			codexItemIdentity
+			Text *string `json:"text"`
+		}
+		if decodeCodexStrictObject(data, &wire) != nil || wire.Text == nil {
+			return invalid
+		}
+	case CodexUserMessageItemType:
+		var wire struct {
+			codexItemIdentity
+			ClientID *string                    `json:"clientId"`
+			Content  *codexArray[codexUserText] `json:"content"`
+		}
+		if decodeCodexStrictObject(data, &wire) != nil || wire.Content == nil {
+			return invalid
+		}
+	case CodexReasoningItemType:
+		var wire struct {
+			codexItemIdentity
+			Summary codexArray[codexJSONString] `json:"summary"`
+			Content codexArray[codexJSONString] `json:"content"`
+		}
+		if err := decodeCodexStrictObject(data, &wire); err != nil {
+			return err
+		}
+	case CodexCommandExecutionItemType:
+		var wire struct {
+			codexItemIdentity
+			Command          *string                         `json:"command"`
+			Cwd              *string                         `json:"cwd"`
+			Source           codexJSONString                 `json:"source"`
+			Status           codexJSONString                 `json:"status"`
+			CommandActions   *codexArray[codexCommandAction] `json:"commandActions"`
+			PluginID         *string                         `json:"pluginId"`
+			ScriptPath       *string                         `json:"scriptPath"`
+			ProcessID        *string                         `json:"processId"`
+			AggregatedOutput *string                         `json:"aggregatedOutput"`
+			ExitCode         *int32                          `json:"exitCode"`
+			DurationMs       *int64                          `json:"durationMs"`
+		}
+		wire.Source = "agent"
+		if decodeCodexStrictObject(data, &wire) != nil || wire.Command == nil || wire.Cwd == nil || wire.CommandActions == nil ||
+			!codexOneOf(string(wire.Source), "agent", "userShell", "unifiedExecStartup", "unifiedExecInteraction") || !validCodexItemStatus(string(wire.Status)) {
+			return invalid
+		}
+	case CodexFileChangeItemType:
+		var wire struct {
+			codexItemIdentity
+			Status  codexJSONString              `json:"status"`
+			Changes *codexArray[codexFileUpdate] `json:"changes"`
+		}
+		if decodeCodexStrictObject(data, &wire) != nil || wire.Changes == nil || !validCodexItemStatus(string(wire.Status)) {
+			return invalid
+		}
+	case CodexImageViewItemType:
+		var wire struct {
+			codexItemIdentity
+			Path *string `json:"path"`
+		}
+		if decodeCodexStrictObject(data, &wire) != nil || wire.Path == nil {
+			return invalid
+		}
+	case CodexSleepItemType:
+		var wire struct {
+			codexItemIdentity
+			DurationMs *uint64 `json:"durationMs"`
+		}
+		if decodeCodexStrictObject(data, &wire) != nil || wire.DurationMs == nil {
+			return invalid
+		}
+	case CodexContextCompactionItemType:
+		if err := decodeCodexStrictObject(data, &identity); err != nil {
+			return err
+		}
+	default:
+		return invalid
+	}
+	*item = decoded
+	return nil
+}
+
+func codexOneOf(value string, allowed ...string) bool {
+	for _, candidate := range allowed {
+		if value == candidate {
+			return true
+		}
+	}
+	return false
+}
+
+func validCodexItemStatus(status string) bool {
+	return codexOneOf(status, "inProgress", "completed", "failed", "declined")
+}
+
+// Typed array fields may have official absent/default semantics, but null is
+// never an array. Element custom decoders enforce their own nested contracts.
+type codexArray[T any] []T
+
+func (array *codexArray[T]) UnmarshalJSON(data []byte) error {
+	data = bytes.TrimSpace(data)
+	if len(data) == 0 || data[0] != '[' {
+		return errors.New("codex protocol: array required")
+	}
+	return decodeCodexStrictValue(data, (*[]T)(array))
+}
+
+// The current runtime submits plain text only. Other UserInput capabilities
+// (skills, mentions, media) require separate contracts and fail closed.
+type codexUserText struct{}
+
+func (*codexUserText) UnmarshalJSON(data []byte) error {
+	var wire struct {
+		Type         codexJSONString `json:"type"`
+		Text         *string         `json:"text"`
+		TextElements codexArray[struct {
+			ByteRange *struct {
+				Start *uint64 `json:"start"`
+				End   *uint64 `json:"end"`
+			} `json:"byteRange"`
+			Placeholder *string `json:"placeholder"`
+		}] `json:"text_elements"`
+	}
+	if err := decodeCodexStrictObject(data, &wire); err != nil {
+		return err
+	}
+	if wire.Type != "text" || wire.Text == nil {
+		return errors.New("codex protocol: invalid user text")
+	}
+	for _, element := range wire.TextElements {
+		if element.ByteRange == nil || element.ByteRange.Start == nil || element.ByteRange.End == nil {
+			return errors.New("codex protocol: invalid text element")
+		}
+	}
+	return nil
+}
+
+type codexCommandAction struct{}
+
+func (*codexCommandAction) UnmarshalJSON(data []byte) error {
+	var tag struct {
+		Type codexJSONString `json:"type"`
+	}
+	if !codexObject(data) || json.Unmarshal(data, &tag) != nil {
+		return errors.New("codex protocol: invalid command action")
+	}
+	// Each selected variant owns its allowed fields, including optional paths.
+	var command *string
+	switch tag.Type {
+	case "read":
+		var wire struct {
+			Type    codexJSONString `json:"type"`
+			Command *string         `json:"command"`
+			Name    *string         `json:"name"`
+			Path    *string         `json:"path"`
+		}
+		if decodeCodexStrictObject(data, &wire) != nil || wire.Name == nil || wire.Path == nil {
+			return errors.New("codex protocol: invalid read action")
+		}
+		command = wire.Command
+	case "listFiles":
+		var wire struct {
+			Type    codexJSONString `json:"type"`
+			Command *string         `json:"command"`
+			Path    *string         `json:"path"`
+		}
+		if err := decodeCodexStrictObject(data, &wire); err != nil {
+			return err
+		}
+		command = wire.Command
+	case "search":
+		var wire struct {
+			Type    codexJSONString `json:"type"`
+			Command *string         `json:"command"`
+			Path    *string         `json:"path"`
+			Query   *string         `json:"query"`
+		}
+		if err := decodeCodexStrictObject(data, &wire); err != nil {
+			return err
+		}
+		command = wire.Command
+	case "unknown": // Official action variant, not an unknown ThreadItem type.
+		var wire struct {
+			Type    codexJSONString `json:"type"`
+			Command *string         `json:"command"`
+		}
+		if err := decodeCodexStrictObject(data, &wire); err != nil {
+			return err
+		}
+		command = wire.Command
+	default:
+		return errors.New("codex protocol: unsupported command action")
+	}
+	if command == nil {
+		return errors.New("codex protocol: command data required")
+	}
+	return nil
+}
+
+type codexFileUpdate struct{}
+
+func (*codexFileUpdate) UnmarshalJSON(data []byte) error {
+	var wire struct {
+		Path *string         `json:"path"`
+		Kind *codexPatchKind `json:"kind"`
+		Diff *string         `json:"diff"`
+	}
+	if err := decodeCodexStrictObject(data, &wire); err != nil {
+		return err
+	}
+	if wire.Path == nil || wire.Kind == nil || wire.Diff == nil {
+		return errors.New("codex protocol: invalid file update")
+	}
+	return nil
+}
+
+type codexPatchKind struct{}
+
+func (*codexPatchKind) UnmarshalJSON(data []byte) error {
+	var tag struct {
+		Type codexJSONString `json:"type"`
+	}
+	if !codexObject(data) || json.Unmarshal(data, &tag) != nil {
+		return errors.New("codex protocol: invalid patch kind")
+	}
+	switch tag.Type {
+	case "add", "delete":
+		return decodeCodexStrictObject(data, &tag)
+	case "update":
+		var wire struct {
+			Type     codexJSONString `json:"type"`
+			MovePath *string         `json:"move_path"`
+		}
+		return decodeCodexStrictObject(data, &wire)
+	default:
+		return errors.New("codex protocol: unsupported patch kind")
+	}
+}
+
 func (item *CodexAgentMessageItem) UnmarshalJSON(data []byte) error {
 	var wire struct {
 		Type           string  `json:"type"`
@@ -301,9 +709,9 @@ func (value *codexJSONString) UnmarshalJSON(data []byte) error {
 }
 
 type CodexItemNotification struct {
-	ThreadID string                 `json:"threadId"`
-	TurnID   string                 `json:"turnId"`
-	Item     *CodexAgentMessageItem `json:"item"`
+	ThreadID string           `json:"threadId"`
+	TurnID   string           `json:"turnId"`
+	Item     *CodexThreadItem `json:"item"`
 }
 
 type CodexItemStartedNotification struct {
@@ -324,6 +732,10 @@ func decodeCodexStrictObject(data []byte, target any) error {
 	if !codexObject(data) {
 		return errors.New("codex protocol: object required")
 	}
+	return decodeCodexStrictValue(data, target)
+}
+
+func decodeCodexStrictValue(data []byte, target any) error {
 	decoder := json.NewDecoder(bytes.NewReader(data))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(target); err != nil {
@@ -487,7 +899,7 @@ func decodeCodexNotification(method CodexMethod, params []byte) (CodexMessage, e
 		notification.ThreadStarted = &event
 	case CodexTurnStarted, CodexTurnCompleted:
 		var event CodexTurnNotification
-		if json.Unmarshal(params, &event) != nil || event.ThreadID == "" || !validCodexTurn(event.Turn) {
+		if decodeCodexStrictObject(params, &event) != nil || event.ThreadID == "" || !validCodexTurn(event.Turn) {
 			return CodexMessage{}, invalid
 		}
 		if (method == CodexTurnStarted) != (event.Turn.Status == CodexTurnInProgress) {
@@ -501,7 +913,7 @@ func decodeCodexNotification(method CodexMethod, params []byte) (CodexMessage, e
 			ItemID   string  `json:"itemId"`
 			Delta    *string `json:"delta"`
 		}
-		if json.Unmarshal(params, &event) != nil || event.ThreadID == "" || event.TurnID == "" || event.ItemID == "" || event.Delta == nil {
+		if decodeCodexStrictObject(params, &event) != nil || event.ThreadID == "" || event.TurnID == "" || event.ItemID == "" || event.Delta == nil {
 			return CodexMessage{}, invalid
 		}
 		notification.AgentMessageDelta = &CodexAgentMessageDeltaNotification{event.ThreadID, event.TurnID, event.ItemID, *event.Delta}

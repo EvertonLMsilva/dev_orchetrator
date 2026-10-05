@@ -50,7 +50,9 @@ func (thread CodexThreadID) StartTurn(text string) (CodexTurnResult, error) {
 	}
 	expected := &CodexResponseExpectation{ID: id, Method: CodexTurnStart}
 	var turnID string
-	var itemID string
+	activeItems := make(map[string]CodexItemType)
+	completedItems := make(map[string]CodexItemType)
+	var lifecycleSeen bool
 	var output strings.Builder
 	// Bound asynchronous traffic as in the handshake/thread boundaries.
 	for events := 0; events < 4096; events++ {
@@ -82,23 +84,34 @@ func (thread CodexThreadID) StartTurn(text string) (CodexTurnResult, error) {
 			itemEvent = &notification.ItemCompleted.CodexItemNotification
 		}
 		if itemEvent != nil {
-			if turnID == "" || itemEvent.ThreadID != thread.value || itemEvent.TurnID != turnID || (itemID != "" && itemEvent.Item.ID != itemID) {
+			if turnID == "" || itemEvent.ThreadID != thread.value || itemEvent.TurnID != turnID {
 				return fail("codex turn item correlation failed")
 			}
 			if len(itemEvent.Item.Text) > codexTurnTextLimit {
 				return fail("codex turn text limit exceeded")
 			}
 			if notification.ItemStarted != nil {
-				itemID = itemEvent.Item.ID
+				if _, exists := activeItems[itemEvent.Item.ID]; exists {
+					return fail("codex turn duplicate item start")
+				}
+				if _, exists := completedItems[itemEvent.Item.ID]; exists {
+					return fail("codex turn reused item ID")
+				}
+				activeItems[itemEvent.Item.ID] = itemEvent.Item.Type
 			} else {
-				itemID = ""
+				if typ, exists := activeItems[itemEvent.Item.ID]; !exists || typ != itemEvent.Item.Type {
+					return fail("codex turn item correlation failed")
+				}
+				delete(activeItems, itemEvent.Item.ID)
+				completedItems[itemEvent.Item.ID] = itemEvent.Item.Type
 			}
+			lifecycleSeen = true
 			// Deltas remain the output source; the completed snapshot is data,
 			// never appended again or interpreted as an outcome or command.
 		}
 		if notification.AgentMessageDelta != nil {
 			delta := notification.AgentMessageDelta
-			if turnID == "" || delta.ThreadID != thread.value || delta.TurnID != turnID || (itemID != "" && delta.ItemID != itemID) {
+			if turnID == "" || delta.ThreadID != thread.value || delta.TurnID != turnID || (lifecycleSeen && activeItems[delta.ItemID] != CodexAgentMessageItemType) {
 				return fail("codex turn delta correlation failed")
 			}
 			if len(delta.Delta) > codexTurnTextLimit-output.Len() {
@@ -112,6 +125,12 @@ func (thread CodexThreadID) StartTurn(text string) (CodexTurnResult, error) {
 				return fail("codex turn event correlation failed")
 			}
 			if notification.Method == CodexTurnCompleted {
+				// Final snapshots validate identity/type but never feed output.
+				for _, item := range event.Turn.Items {
+					if lifecycleSeen && activeItems[item.ID] != item.Type && completedItems[item.ID] != item.Type {
+						return fail("codex turn snapshot item correlation failed")
+					}
+				}
 				return CodexTurnResult{TurnID: CodexTurnID{turnID}, Status: event.Turn.Status, Text: output.String(), Error: event.Turn.Error}, nil
 			}
 		}

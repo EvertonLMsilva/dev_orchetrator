@@ -7,10 +7,10 @@ import (
 	"testing"
 )
 
-const turnResponse = `{"id":3,"result":{"turn":{"id":"turn-1","status":"inProgress","error":null}}}`
+const turnResponse = `{"id":3,"result":{"turn":{"id":"turn-1","items":[],"status":"inProgress","error":null}}}`
 
 func turnEvent(status string) string {
-	return `{"method":"turn/completed","params":{"threadId":"thread-1","turn":{"id":"turn-1","status":"` + status + `","error":null}}}`
+	return `{"method":"turn/completed","params":{"threadId":"thread-1","turn":{"id":"turn-1","items":[],"status":"` + status + `","error":null}}}`
 }
 func turnDelta(text string) string {
 	b, _ := json.Marshal(text)
@@ -181,5 +181,71 @@ func TestCodexTurnItemOutputBoundAndNoDuplication(t *testing.T) {
 		} else if err != nil || got.Text != text || got.Status != CodexTurnCompletedStatus {
 			t.Fatal("completed snapshot duplicated output", err)
 		}
+	}
+}
+
+func TestCodexNormalItemLifecycleSequences(t *testing.T) {
+	for _, item := range normalCodexItems() {
+		if item.name == "agentMessage" {
+			continue
+		}
+		started := officialItemEvent("item/started", item.wire)
+		completed := officialItemEvent("item/completed", item.wire)
+		for _, tc := range []struct {
+			name   string
+			events []string
+			fail   bool
+		}{
+			{"complete", []string{turnResponse, started, completed, turnEvent("completed")}, false},
+			{"non_terminal", []string{turnResponse, started, completed}, true},
+			{"wrong_thread", []string{turnResponse, strings.Replace(started, "thread-1", "other", 1)}, true},
+			{"wrong_turn", []string{turnResponse, started, strings.Replace(completed, "turn-1", "other", 1)}, true},
+			{"wrong_item", []string{turnResponse, started, strings.Replace(completed, "item-1", "other", 1)}, true},
+			{"delta_from_lifecycle", []string{turnResponse, started, turnDelta("must not output"), completed, turnEvent("completed")}, true},
+		} {
+			t.Run(item.name+"/"+tc.name, func(t *testing.T) {
+				f := &threadFake{messages: tc.events}
+				got, err := turnThread(t, f).StartTurn("task")
+				if (err != nil) != tc.fail {
+					t.Fatalf("result=%+v error=%v", got, err)
+				}
+				if !tc.fail && (got.Text != "" || got.Status != CodexTurnCompletedStatus || len(f.messages) != 0) {
+					t.Fatal("lifecycle affected output or terminated early")
+				}
+			})
+		}
+	}
+}
+
+func TestCodexMixedItemCorrelation(t *testing.T) {
+	plan := normalCodexItems()[2].wire
+	agent := strings.Replace(normalCodexItems()[1].wire, "item-1", "item-2", 1)
+	startPlan := officialItemEvent("item/started", plan)
+	endPlan := officialItemEvent("item/completed", plan)
+	startAgent := officialItemEvent("item/started", agent)
+	endAgent := officialItemEvent("item/completed", agent)
+	delta := strings.Replace(turnDelta("reply"), "item-1", "item-2", 1)
+	terminal := strings.Replace(turnEvent("completed"), `"items":[]`, `"items":[`+plan+`,`+agent+`]`, 1)
+	for _, tc := range []struct {
+		name   string
+		events []string
+		fail   bool
+	}{
+		{"interleaved", []string{turnResponse, startPlan, startAgent, delta, endPlan, endAgent, terminal}, false},
+		{"duplicate_start", []string{turnResponse, startPlan, startPlan}, true},
+		{"orphan_completion", []string{turnResponse, endPlan}, true},
+		{"wrong_type", []string{turnResponse, startPlan, officialItemEvent("item/completed", normalCodexItems()[1].wire)}, true},
+		{"delta_after_completion", []string{turnResponse, startAgent, endAgent, delta}, true},
+		{"wrong_snapshot", []string{turnResponse, startPlan, endPlan, strings.Replace(terminal, "item-1", "other", 1)}, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := turnThread(t, &threadFake{messages: tc.events}).StartTurn("task")
+			if (err != nil) != tc.fail {
+				t.Fatalf("%+v %v", got, err)
+			}
+			if !tc.fail && (got.Text != "reply" || got.Status != CodexTurnCompletedStatus) {
+				t.Fatal("mixed output changed")
+			}
+		})
 	}
 }
