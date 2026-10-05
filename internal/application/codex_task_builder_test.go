@@ -13,7 +13,7 @@ func codexTaskRequestForTest() CodexTaskRequest {
 	session := domain.SessionID("session")
 	return CodexTaskRequest{
 		Decision: ports.PlannerDecision{ProjectID: "project", TaskID: "task", Type: ports.PlannerDecisionPrepareExecutor, Reason: "Work is authorized"},
-		Spec:     ExecutorTaskSpec{Objective: "Add validation", Scope: []string{"internal/example.go"}, AcceptanceCriteria: []string{"Invalid inputs are rejected"}},
+		Spec:     ports.ExecutorTaskSpec{Objective: "Add validation", Scope: []string{"internal/example.go"}, AcceptanceCriteria: []string{"Invalid inputs are rejected"}},
 		Metadata: CodexTaskMetadata{ProtocolVersion: "v1", MessageID: "message", CorrelationID: "correlation", SessionID: &session, CreatedAt: time.Date(2026, 10, 3, 12, 0, 0, 0, time.UTC)},
 	}
 }
@@ -71,7 +71,7 @@ func TestCodexTaskBuilderRejectsInvalidRequests(t *testing.T) {
 		}},
 		{"block", func(r *CodexTaskRequest) { r.Decision.Type = ports.PlannerDecisionBlock }},
 		{"unexpected evidence", func(r *CodexTaskRequest) { r.Decision.EvidenceKind = domain.ActionTypeSearch }},
-		{"zero spec", func(r *CodexTaskRequest) { r.Spec = ExecutorTaskSpec{} }},
+		{"zero spec", func(r *CodexTaskRequest) { r.Spec = ports.ExecutorTaskSpec{} }},
 		{"objective empty", func(r *CodexTaskRequest) { r.Spec.Objective = "" }},
 		{"objective blank", func(r *CodexTaskRequest) { r.Spec.Objective = " \t\n\u2003" }},
 		{"scope empty", func(r *CodexTaskRequest) { r.Spec.Scope = nil }},
