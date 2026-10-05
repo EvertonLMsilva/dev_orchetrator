@@ -110,6 +110,19 @@ func validManagedCodexAuth(material []byte) bool {
 		strings.TrimSpace(tokens.Refresh) != "" && (tokens.Account == nil || strings.TrimSpace(*tokens.Account) != "")
 }
 
+// ValidRuntimeCodexAuth reuses the managed-file schema but requires the explicit
+// runtime-owned ChatGPT mode. It never returns parser errors or sensitive data.
+// AuthorizedCodexHome retains its existing legacy-file compatibility.
+func ValidRuntimeCodexAuth(material []byte) bool {
+	if len(material) == 0 || len(material) > maxCodexAuthBytes || !validManagedCodexAuth(material) {
+		return false
+	}
+	var mode struct {
+		Mode string `json:"auth_mode"`
+	}
+	return json.Unmarshal(material, &mode) == nil && mode.Mode == "chatgpt"
+}
+
 // Reject duplicate keys rather than letting Go and the provider disagree about
 // the selected auth mode or material. Bound nesting before decoding credentials.
 func uniqueAuthJSON(material []byte) bool {
