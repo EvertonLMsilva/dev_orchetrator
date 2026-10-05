@@ -3,7 +3,7 @@ package infrastructure
 import "context"
 
 // obtain transfers ownership of the sensitive buffer to the environment. The
-// source must not retain or log it. No production credential reader is provided.
+// source must not retain or log it. AuthorizedCodexHome is the explicit file source.
 type chatGPTAuthSource interface {
 	obtain(context.Context) ([]byte, error)
 }
