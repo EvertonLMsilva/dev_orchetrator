@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/netip"
 	"path"
 	"path/filepath"
 	"strings"
@@ -20,11 +21,87 @@ import (
 // must place it under a RuntimeHomeLease before Prepare or Start. Credentials
 // travel only through bounded stdin/stdout buffers and container tmpfs.
 type RuntimeHomeDockerContainer struct {
-	driver    *DockerDriver
-	egress    *ownedCodexEgress
-	id        string
-	process   *CodexProcessTransport
-	destroyed bool
+	driver               *DockerDriver
+	egress               *ownedCodexEgress
+	id                   string
+	process              *CodexProcessTransport
+	destroyed            bool
+	containerStartResult string
+	appServerStartResult string
+}
+
+func (c *RuntimeHomeDockerContainer) StageDiagnosticLines() []string {
+	containerResult, appResult := "UNKNOWN", "UNKNOWN"
+	if c != nil {
+		if c.containerStartResult == "PASS" || c.containerStartResult == "FAIL" {
+			containerResult = c.containerStartResult
+		}
+		if c.appServerStartResult == "PASS" || c.appServerStartResult == "FAIL" {
+			appResult = c.appServerStartResult
+		}
+	}
+	return []string{"stage=CONTAINER_START result=" + containerResult, "stage=APP_SERVER_START result=" + appResult}
+}
+
+// Reuses the bounded, sanitized proxy diagnostics without changing proxy config.
+// A missing observation is UNKNOWN, never evidence that a request did not occur.
+func (c *RuntimeHomeDockerContainer) NetworkDiagnosticLines(ctx context.Context) []string {
+	if c == nil || c.egress == nil || c.destroyed {
+		return runtimeHomeNetworkLines(nil)
+	}
+	diagnostics, err := c.egress.proxyDiagnostics(ctx, []string{"auth.openai.com", "chatgpt.com"})
+	if err != nil {
+		return runtimeHomeNetworkLines(nil)
+	}
+	return runtimeHomeNetworkLines(diagnostics)
+}
+
+func runtimeHomeNetworkLines(records []codexProxyDiagnostic) []string {
+	var lines []string
+	for _, d := range records {
+		if len(lines) >= 768 {
+			break
+		}
+		if len(d.Host) > 253 || !codexHostname.MatchString(d.Host) || d.Port < 1 || d.Port > 65535 {
+			continue
+		}
+		if _, err := netip.ParseAddr(d.Host); err == nil {
+			continue
+		}
+		// Also reject partial/numeric IP-like authorities, as the proxy parser does.
+		if strings.Trim(d.Host, "0123456789.") == "" {
+			continue
+		}
+		decision := "DENY"
+		if d.Port == 443 && (d.Host == "auth.openai.com" || d.Host == "chatgpt.com") {
+			decision = "ALLOW"
+		}
+		dns, upstream := "UNKNOWN", "UNKNOWN"
+		if d.DNSResolution == "SUCCESS" || d.DNSResolution == "FAIL" {
+			dns = d.DNSResolution
+		}
+		if d.UpstreamConnect == "SUCCESS" || d.UpstreamConnect == "FAIL" {
+			upstream = d.UpstreamConnect
+		}
+		policyResult := "FAIL"
+		if decision == "ALLOW" {
+			policyResult = "PASS"
+		}
+		lines = append(lines, fmt.Sprintf("hostname=%s port=%d policy_decision=%s dns_resolution=%s upstream_connect=%s", d.Host, d.Port, decision, dns, upstream), "stage=PROXY_CONNECT result=PASS", "stage=NETWORK_POLICY result="+policyResult)
+		for _, s := range []struct{ stage, state string }{{"DNS", dns}, {"UPSTREAM_CONNECT", upstream}} {
+			result := "UNKNOWN"
+			if s.state == "SUCCESS" {
+				result = "PASS"
+			} else if s.state == "FAIL" {
+				result = "FAIL"
+			}
+			lines = append(lines, "stage="+s.stage+" result="+result)
+		}
+	}
+	if len(lines) == 0 {
+		return []string{"requested_hostname=UNKNOWN requested_port=UNKNOWN policy_decision=UNKNOWN dns_resolution=UNKNOWN upstream_connect=UNKNOWN", "stage=PROXY_CONNECT result=UNKNOWN", "stage=NETWORK_POLICY result=UNKNOWN", "stage=DNS result=UNKNOWN", "stage=UPSTREAM_CONNECT result=UNKNOWN"}
+	}
+	return lines
 }
 
 func (*RuntimeHomeDockerContainer) Format(s fmt.State, _ rune) {
@@ -56,9 +133,14 @@ func (c *RuntimeHomeDockerContainer) Prepare(ctx context.Context, archive io.Rea
 	defer cancel()
 	created, err := c.driver.client.ContainerCreate(bounded, opts)
 	c.id = created.ID
-	if err != nil || c.id == "" || c.driver.Start(bounded, c.id) != nil {
+	if err != nil || c.id == "" {
 		return errors.New("runtime creation failed")
 	}
+	if c.driver.Start(bounded, c.id) != nil {
+		c.containerStartResult = "FAIL"
+		return errors.New("runtime creation failed")
+	}
+	c.containerStartResult = "PASS"
 	data, err := io.ReadAll(io.LimitReader(archive, 1024*1024+8193))
 	defer clear(data)
 	if err != nil || len(data) > 1024*1024+8192 {
@@ -88,6 +170,11 @@ func (c *RuntimeHomeDockerContainer) Start(ctx context.Context) (CodexExecutorSe
 		return nil, errors.New("runtime version rejected")
 	}
 	c.process, err = startLeaseCodexProcessRuntime(ctx, c.egress, c.id)
+	if err != nil {
+		c.appServerStartResult = "FAIL"
+	} else {
+		c.appServerStartResult = "PASS"
+	}
 	return c.process, err
 }
 

@@ -39,6 +39,39 @@ func TestRuntimeHomeDockerFailClosedPolicy(t *testing.T) {
 	}
 }
 
+func TestRuntimeHomeSafeNetworkDiagnostics(t *testing.T) {
+	for _, tc := range []struct{ logs, want string }{
+		{"CONNECT_HOST auth.openai.com 443\n", "hostname=auth.openai.com port=443 policy_decision=ALLOW dns_resolution=UNKNOWN upstream_connect=UNKNOWN"},
+		{"CONNECT_STATE auth.openai.com 443 SUCCESS FAIL NO\n", "dns_resolution=SUCCESS upstream_connect=FAIL"},
+		{"CONNECT_STATE auth.openai.com 443 FAIL UNKNOWN NO\n", "dns_resolution=FAIL upstream_connect=UNKNOWN"},
+		{"CONNECT_HOST third.invalid 443\n", "hostname=third.invalid port=443 policy_decision=DENY"},
+		{"CONNECT_HOST auth.openai.com@SECRET 443\nCONNECT_HOST 127.0.0.1 443\nRAW_SECRET_BODY\n", "requested_hostname=UNKNOWN"},
+		{"CONNECT_STATE auth.openai.com 443 SECRET SECRET SECRET\n", "requested_hostname=UNKNOWN"},
+		{"CONNECT_HOST auth.openai.com 99999\n", "requested_hostname=UNKNOWN"},
+	} {
+		lines := strings.Join(runtimeHomeNetworkLines(safeProxyDiagnostics(tc.logs, []string{"auth.openai.com", "chatgpt.com"})), "\n")
+		if !strings.Contains(lines, tc.want) || strings.Contains(lines, "SECRET") || strings.Contains(lines, "RAW") {
+			t.Fatal("unsafe network diagnostics")
+		}
+	}
+	lines := strings.Join(runtimeHomeNetworkLines([]codexProxyDiagnostic{{Host: "SECRET@invalid", Port: 443, Decision: "ALLOW", DNSResolution: "SECRET"}}), "\n")
+	if strings.Contains(lines, "SECRET") || !strings.Contains(lines, "result=UNKNOWN") {
+		t.Fatal("unknown network data not closed")
+	}
+}
+
+func TestRuntimeHomeSafeStageDiagnostics(t *testing.T) {
+	c := &RuntimeHomeDockerContainer{containerStartResult: "PASS", appServerStartResult: "SECRET"}
+	lines := strings.Join(c.StageDiagnosticLines(), "\n")
+	if !strings.Contains(lines, "stage=CONTAINER_START result=PASS") || !strings.Contains(lines, "stage=APP_SERVER_START result=UNKNOWN") || strings.Contains(lines, "SECRET") {
+		t.Fatal("unsafe infrastructure stage diagnostic")
+	}
+	lines = strings.Join(c.NetworkDiagnosticLines(context.Background()), "\n")
+	if !strings.Contains(lines, "requested_hostname=UNKNOWN") || strings.Contains(lines, "result=PASS") {
+		t.Fatal("unobserved proxy success")
+	}
+}
+
 type liveAccountSession struct{ request []byte }
 
 func (s *liveAccountSession) Write(b []byte) error { s.request = append([]byte(nil), b...); return nil }

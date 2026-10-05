@@ -55,6 +55,7 @@ func TestDeviceCodeLiveOptIn(t *testing.T) {
 	}
 	lease, err := store.Bootstrap(ctx, container)
 	if err != nil {
+		liveBootstrapDiagnostics(t, container, nil)
 		container.Destroy(ctx)
 		t.Fatal("fresh runtime home preparation failed")
 	}
@@ -65,10 +66,12 @@ func TestDeviceCodeLiveOptIn(t *testing.T) {
 	}()
 	session, err := container.Start(ctx)
 	if err != nil {
+		liveBootstrapDiagnostics(t, container, nil)
 		t.Fatal("app_server=FAIL")
 	}
 	bootstrap := NewDeviceCodeBootstrap(liveContextTransport{session}, 15*time.Minute)
 	attempt, err := bootstrap.Start(ctx)
+	liveBootstrapDiagnostics(t, container, bootstrap)
 	if err != nil {
 		liveDenied(t, container)
 		t.Fatal("LOGIN=" + liveLoginFailure(ctx, bootstrap.deadline))
@@ -144,6 +147,25 @@ func liveLoginFailure(ctx context.Context, deadline time.Time) string {
 		return "CANCELLED"
 	}
 	return "FAIL"
+}
+
+func liveBootstrapDiagnostics(t *testing.T, c *infrastructure.RuntimeHomeDockerContainer, b *DeviceCodeBootstrap) {
+	t.Helper()
+	for _, line := range c.StageDiagnosticLines() {
+		t.Log(line)
+	}
+	diagnostic := BootstrapDiagnostics{}
+	if b != nil {
+		diagnostic = b.Diagnostics()
+	}
+	for _, line := range diagnostic.Lines() {
+		t.Log(line)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	for _, line := range c.NetworkDiagnosticLines(ctx) {
+		t.Log(line)
+	}
 }
 
 func liveDenied(t *testing.T, c *infrastructure.RuntimeHomeDockerContainer) {

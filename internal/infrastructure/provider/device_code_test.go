@@ -198,6 +198,154 @@ func TestDeviceCodeInitializeFailure(t *testing.T) {
 
 type canceledIO struct{}
 
+func TestDeviceCodeSafeDiagnosticsStages(t *testing.T) {
+	for _, tc := range []struct{ response, stage, class string }{
+		{`{"id":1,"error":{"code":-32600,"message":"SECRET_RAW"}}`, "INITIALIZE", "RPC_ERROR"},
+		{`{"id":1,"result":{}}`, "INITIALIZE", "RESPONSE_DECODE"},
+		{`{"id":2,"error":{"code":-32602,"message":"SECRET_RAW","data":{"token":"SECRET_BODY"}}}`, "LOGIN_RPC_START", "RPC_ERROR"},
+		{`{"id":2,"result":{}}`, "LOGIN_RPC_START", "RESPONSE_DECODE"},
+	} {
+		f := session(tc.response)
+		if tc.stage == "INITIALIZE" {
+			f = &fakeSession{messages: [][]byte{[]byte(tc.response)}}
+		}
+		b := NewDeviceCodeBootstrap(f, time.Minute)
+		if _, err := b.Start(context.Background()); err == nil {
+			t.Fatal("failure accepted")
+		}
+		lines := strings.Join(b.Diagnostics().Lines(), "\n")
+		if !strings.Contains(lines, "stage="+tc.stage+" result=FAIL") || !strings.Contains(lines, "classification="+tc.class) {
+			t.Fatal("incorrect sanitized diagnostic")
+		}
+		if strings.Contains(lines, "SECRET") || strings.Contains(lines, "message") || strings.Contains(lines, "token") {
+			t.Fatal("diagnostic leak")
+		}
+		if tc.stage == "INITIALIZE" && strings.Contains(lines, "stage=LOGIN_RPC_START result=PASS") {
+			t.Fatal("unobserved login stage passed")
+		}
+	}
+}
+
+func TestDeviceCodeSafeRemoteStatus(t *testing.T) {
+	for _, tc := range []struct {
+		message, class string
+		status         int
+	}{
+		{"device code request failed with status 403 Forbidden", "REMOTE_STATUS", 403},
+		{"failed to request device code: device code request failed with status 401 Unauthorized", "REMOTE_STATUS", 401},
+		{"device code login is not enabled for this Codex server. Use the browser login or verify the server URL.", "DEVICE_CODE_NOT_ENABLED", 404},
+		{"SECRET 404 body Unauthorized", "RPC_ERROR", 0},
+		{"device code request failed with status 999 SECRET", "RPC_ERROR", 0},
+		{"device code request failed with status 403 Forbidden SECRET_BODY", "RPC_ERROR", 0},
+	} {
+		code := -32603
+		if tc.class == "DEVICE_CODE_NOT_ENABLED" {
+			code = -32600
+		}
+		raw, _ := json.Marshal(map[string]any{"id": 2, "error": map[string]any{"code": code, "message": tc.message}})
+		b := NewDeviceCodeBootstrap(session(string(raw)), time.Minute)
+		b.Start(context.Background())
+		lines := strings.Join(b.Diagnostics().Lines(), "\n")
+		if !strings.Contains(lines, "classification="+tc.class) || strings.Contains(lines, "SECRET") || strings.Contains(lines, "body") {
+			t.Fatal("unsafe remote classification")
+		}
+		if tc.status != 0 && !strings.Contains(lines, fmt.Sprintf("http_status=%d", tc.status)) {
+			t.Fatal("safe status missing")
+		}
+		if tc.status == 0 && strings.Contains(lines, "http_status=") {
+			t.Fatal("status invented")
+		}
+		if !strings.Contains(lines, fmt.Sprintf("rpc_code=%d", code)) {
+			t.Fatal("RPC code not preserved")
+		}
+	}
+}
+
+func TestDeviceCodeSafeDiagnosticsUnknownAndSuccess(t *testing.T) {
+	b := NewDeviceCodeBootstrap(session(attemptResponse), time.Minute)
+	before := strings.Join(b.Diagnostics().Lines(), "\n")
+	if strings.Contains(before, "result=PASS") || !strings.Contains(before, "classification=UNKNOWN") {
+		t.Fatal("unobserved success")
+	}
+	if _, err := b.Start(context.Background()); err != nil {
+		t.Fatal("fake start failed")
+	}
+	lines := strings.Join(b.Diagnostics().Lines(), "\n")
+	for _, stage := range []string{"INITIALIZE", "INITIALIZED", "LOGIN_RPC_START", "DEVICE_CODE_REQUEST", "RESPONSE_DECODE"} {
+		if !strings.Contains(lines, "stage="+stage+" result=PASS") {
+			t.Fatal("observed stage missing")
+		}
+	}
+	if strings.Contains(lines, "SECRET") || strings.Contains(fmt.Sprintf("%#v", b.Diagnostics()), "SECRET") {
+		t.Fatal("diagnostic leak")
+	}
+}
+
+type diagnosticWriteFailure struct {
+	*fakeSession
+	failAt, writesSeen int
+}
+
+func (f *diagnosticWriteFailure) Write(ctx context.Context, data []byte) error {
+	f.writesSeen++
+	if f.writesSeen == f.failAt {
+		return errors.New("SECRET_RAW_BODY")
+	}
+	return f.fakeSession.Write(ctx, data)
+}
+func TestDeviceCodeSafeWriteStages(t *testing.T) {
+	for i, stage := range []string{"INITIALIZE", "INITIALIZED", "LOGIN_RPC_START"} {
+		f := &diagnosticWriteFailure{fakeSession: session(attemptResponse), failAt: i + 1}
+		b := NewDeviceCodeBootstrap(f, time.Minute)
+		if _, err := b.Start(context.Background()); err == nil {
+			t.Fatal("transport failure ignored")
+		}
+		lines := strings.Join(b.Diagnostics().Lines(), "\n")
+		if !strings.Contains(lines, "stage="+stage+" result=FAIL") || !strings.Contains(lines, "classification=TRANSPORT") || strings.Contains(lines, "SECRET") {
+			t.Fatal("unsafe write-stage diagnostic")
+		}
+		if !strings.Contains(lines, "stage=DEVICE_CODE_REQUEST result=UNKNOWN") {
+			t.Fatal("device request inferred from write failure")
+		}
+	}
+}
+func TestDeviceCodeSafeDiagnosticsMalformedRemoteAndUnknown(t *testing.T) {
+	b := NewDeviceCodeBootstrap(session(`{"id":2,"error":{"code":"SECRET","message":"SECRET_BODY"}}`), time.Minute)
+	b.Start(context.Background())
+	lines := strings.Join(b.Diagnostics().Lines(), "\n")
+	if strings.Contains(lines, "SECRET") || strings.Contains(lines, "rpc_code=") || strings.Contains(lines, "http_status=") {
+		t.Fatal("unsafe malformed RPC metadata")
+	}
+	d := BootstrapDiagnostics{classification: "SECRET", httpStatus: 999}
+	d.results[diagInitialize] = "SECRET"
+	lines = strings.Join(d.Lines(), "\n")
+	if strings.Contains(lines, "SECRET") || strings.Contains(lines, "http_status=") || !strings.Contains(lines, "classification=UNKNOWN") {
+		t.Fatal("unknown diagnostics not closed")
+	}
+	raw, _ := json.Marshal(b.Diagnostics())
+	if strings.Contains(string(raw), "SECRET") {
+		t.Fatal("JSON diagnostics leaked")
+	}
+}
+
+func TestDeviceCodeSafeDiagnosticsDoNotReusePriorSuccess(t *testing.T) {
+	f := session(attemptResponse, `{"id":3,"result":{"status":"canceled"}}`, `{"id":1,"result":{}}`)
+	b := NewDeviceCodeBootstrap(f, time.Minute)
+	if _, err := b.Start(context.Background()); err != nil {
+		t.Fatal("fake start failed")
+	}
+	if _, err := b.Cancel(context.Background()); err != nil {
+		t.Fatal("fake cancel failed")
+	}
+	if _, err := b.Start(context.Background()); err == nil {
+		t.Fatal("invalid initialization accepted")
+	}
+	lines := strings.Join(b.Diagnostics().Lines(), "\n")
+	if !strings.Contains(lines, "stage=INITIALIZE result=FAIL") || !strings.Contains(lines, "stage=LOGIN_RPC_START result=UNKNOWN") || !strings.Contains(lines, "stage=DEVICE_CODE_REQUEST result=UNKNOWN") {
+		t.Fatal("prior success reused")
+	}
+}
+
 func (canceledIO) Write(ctx context.Context, _ []byte) error { return ctx.Err() }
 func (canceledIO) Read(context.Context) ([]byte, error)      { return nil, errors.New("TOKEN_RAW") }
 func TestDeviceCodeTransportFailure(t *testing.T) {

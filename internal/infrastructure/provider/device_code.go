@@ -9,6 +9,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -52,23 +54,128 @@ type DeviceCodeTransport interface {
 // Operations are serialized. The timeout covers the whole attempt, including
 // initialization; callers may also provide shorter per-operation deadlines.
 type DeviceCodeBootstrap struct {
-	mu        sync.Mutex
-	transport DeviceCodeTransport
-	timeout   time.Duration
-	deadline  time.Time
-	state     AuthState
-	attempt   LoginAttempt
-	early     *completionWire
+	mu          sync.Mutex
+	transport   DeviceCodeTransport
+	timeout     time.Duration
+	deadline    time.Time
+	state       AuthState
+	attempt     LoginAttempt
+	early       *completionWire
+	diagnostic  BootstrapDiagnostics
+	activeStage int
+}
+
+const (
+	diagInitialize = iota
+	diagInitialized
+	diagLoginRPC
+	diagDeviceRequest
+	diagResponseDecode
+	diagRPCError
+	diagRemoteStatus
+)
+
+// Diagnostics retain only bounded classifications and integers, never messages,
+// request/response payloads, account data or login presentation material.
+type BootstrapDiagnostics struct {
+	results        [7]string
+	classification string
+	rpcCode        int64
+	hasRPCCode     bool
+	httpStatus     int
+}
+
+func (d BootstrapDiagnostics) Lines() []string {
+	var lines []string
+	for i, stage := range []string{"INITIALIZE", "INITIALIZED", "LOGIN_RPC_START", "DEVICE_CODE_REQUEST", "RESPONSE_DECODE", "RPC_ERROR", "REMOTE_STATUS"} {
+		result := d.results[i]
+		if result != "PASS" && result != "FAIL" {
+			result = "UNKNOWN"
+		}
+		lines = append(lines, "stage="+stage+" result="+result)
+	}
+	class := d.classification
+	switch class {
+	case "RPC_ERROR", "REMOTE_STATUS", "DEVICE_CODE_NOT_ENABLED", "RESPONSE_DECODE", "TRANSPORT", "TIMEOUT_OR_CANCELLATION":
+	default:
+		class = "UNKNOWN"
+	}
+	lines = append(lines, "classification="+class)
+	if d.hasRPCCode {
+		lines = append(lines, fmt.Sprintf("rpc_code=%d", d.rpcCode))
+	}
+	if d.httpStatus >= 100 && d.httpStatus <= 599 {
+		lines = append(lines, fmt.Sprintf("http_status=%d", d.httpStatus))
+	}
+	return lines
+}
+
+func (d BootstrapDiagnostics) Format(s fmt.State, _ rune) {
+	io.WriteString(s, strings.Join(d.Lines(), "\n"))
+}
+func (b *DeviceCodeBootstrap) Diagnostics() BootstrapDiagnostics {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.diagnostic
+}
+
+func (b *DeviceCodeBootstrap) diagnoseRPC(raw []byte, id int) {
+	b.diagnostic.classification = "RPC_ERROR"
+	b.diagnostic.results[diagRPCError] = "FAIL"
+	var remote struct {
+		Code    *int64  `json:"code"`
+		Message *string `json:"message"`
+	}
+	if json.Unmarshal(raw, &remote) != nil || remote.Code == nil {
+		return
+	}
+	b.diagnostic.rpcCode = *remote.Code
+	b.diagnostic.hasRPCCode = true
+	if id != 2 || remote.Message == nil {
+		return
+	}
+	message := *remote.Message
+	// Exact Codex 0.159.2 templates only. No substring searches or body parsing.
+	if message == "device code login is not enabled for this Codex server. Use the browser login or verify the server URL." {
+		b.diagnostic.classification = "DEVICE_CODE_NOT_ENABLED"
+		b.diagnostic.httpStatus = 404
+	} else {
+		message = strings.TrimPrefix(message, "failed to request device code: ")
+		for status := 400; status <= 599; status++ {
+			reason := http.StatusText(status)
+			if reason != "" && message == fmt.Sprintf("device code request failed with status %d %s", status, reason) {
+				b.diagnostic.classification = "REMOTE_STATUS"
+				b.diagnostic.httpStatus = status
+				break
+			}
+		}
+	}
+	if b.diagnostic.httpStatus != 0 {
+		b.diagnostic.results[diagDeviceRequest] = "FAIL"
+		b.diagnostic.results[diagRemoteStatus] = "FAIL"
+	}
 }
 
 func NewDeviceCodeBootstrap(t DeviceCodeTransport, timeout time.Duration) *DeviceCodeBootstrap {
-	return &DeviceCodeBootstrap{transport: t, timeout: timeout, state: Unauthenticated}
+	return &DeviceCodeBootstrap{transport: t, timeout: timeout, state: Unauthenticated, activeStage: -1}
 }
 func (*DeviceCodeBootstrap) Format(s fmt.State, _ rune) {
 	io.WriteString(s, "DeviceCodeBootstrap[redacted]")
 }
 func (b *DeviceCodeBootstrap) State() AuthState { b.mu.Lock(); defer b.mu.Unlock(); return b.state }
 func (b *DeviceCodeBootstrap) fail(kind string) error {
+	if b.activeStage >= 0 {
+		b.diagnostic.results[b.activeStage] = "FAIL"
+	}
+	switch kind {
+	case "protocol", "correlation", "message limit":
+		b.diagnostic.results[diagResponseDecode] = "FAIL"
+		b.diagnostic.classification = "RESPONSE_DECODE"
+	case "transport":
+		b.diagnostic.classification = "TRANSPORT"
+	case "timeout or cancellation":
+		b.diagnostic.classification = "TIMEOUT_OR_CANCELLATION"
+	}
 	b.state = AuthFailed
 	b.attempt = LoginAttempt{}
 	b.early = nil
@@ -208,6 +315,7 @@ func (b *DeviceCodeBootstrap) read(ctx context.Context, id int) (json.RawMessage
 			return nil, b.fail("correlation")
 		}
 		if e.Error != nil {
+			b.diagnoseRPC(e.Error, id)
 			return nil, b.fail("remote failure")
 		}
 		return e.Result, nil
@@ -218,10 +326,13 @@ func (b *DeviceCodeBootstrap) read(ctx context.Context, id int) (json.RawMessage
 func (b *DeviceCodeBootstrap) Start(ctx context.Context) (LoginAttempt, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	b.diagnostic = BootstrapDiagnostics{}
+	b.activeStage = -1
 	if b.state != Unauthenticated || b.transport == nil || b.timeout <= 0 {
 		return LoginAttempt{}, b.fail("invalid state or configuration")
 	}
 	b.deadline = time.Now().Add(b.timeout)
+	b.activeStage = diagInitialize
 	ctx, cancel := b.operationContext(ctx)
 	defer cancel()
 	request, _ := infrastructure.EncodeCodexInitialize(infrastructure.CodexIntegerID(1), infrastructure.CodexClientInfo{Name: "dev-orchestrator", Version: "0.1.0"})
@@ -246,11 +357,15 @@ func (b *DeviceCodeBootstrap) Start(ctx context.Context) (LoginAttempt, error) {
 	if err != nil || b.early != nil {
 		return LoginAttempt{}, b.fail("protocol")
 	}
+	b.diagnostic.results[diagInitialize] = "PASS"
+	b.activeStage = diagInitialized
 	if err = b.write(ctx, struct {
 		Method string `json:"method"`
 	}{"initialized"}); err != nil {
 		return LoginAttempt{}, err
 	}
+	b.diagnostic.results[diagInitialized] = "PASS"
+	b.activeStage = diagLoginRPC
 	if err = b.write(ctx, rpcRequest{2, "account/login/start", struct {
 		Type string `json:"type"`
 	}{"chatgptDeviceCode"}}); err != nil {
@@ -273,6 +388,10 @@ func (b *DeviceCodeBootstrap) Start(ctx context.Context) (LoginAttempt, error) {
 	if b.early != nil && *b.early.LoginID != a.LoginID {
 		return LoginAttempt{}, b.fail("correlation")
 	}
+	b.diagnostic.results[diagLoginRPC] = "PASS"
+	b.diagnostic.results[diagDeviceRequest] = "PASS"
+	b.diagnostic.results[diagResponseDecode] = "PASS"
+	b.activeStage = -1
 	b.attempt = LoginAttempt{a.LoginID, a.VerificationURL, a.UserCode}
 	b.state = LoginPending
 	return b.attempt, nil
