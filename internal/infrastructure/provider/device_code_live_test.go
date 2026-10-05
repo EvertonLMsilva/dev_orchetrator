@@ -88,7 +88,11 @@ func TestDeviceCodeLiveOptIn(t *testing.T) {
 		t.Fatal("LOGIN=" + liveLoginFailure(ctx, bootstrap.deadline))
 	}
 	t.Log("LOGIN=PASS")
-	kind, code := infrastructure.ReadRuntimeHomeAccount(ctx, session)
+	accountDiagnostic := infrastructure.ReadRuntimeHomeAccountDiagnostics(ctx, session)
+	for _, line := range accountDiagnostic.Lines() {
+		t.Log("account_read_phase=BEFORE_CAPTURE " + line)
+	}
+	kind, code := accountDiagnostic.LegacyResult()
 	liveDenied(t, container)
 	liveAccountResult(t, kind, code)
 	// Routing failure still preserves a valid freshly created session as evidence.
@@ -124,7 +128,11 @@ func TestDeviceCodeLiveOptIn(t *testing.T) {
 	if err != nil || initializeLiveSession(ctx, nextSession) != nil {
 		t.Fatal("RESTART_SESSION=FAIL")
 	}
-	restartKind, _ := infrastructure.ReadRuntimeHomeAccount(ctx, nextSession)
+	restartDiagnostic := infrastructure.ReadRuntimeHomeAccountDiagnostics(ctx, nextSession)
+	for _, line := range restartDiagnostic.Lines() {
+		t.Log("account_read_phase=AFTER_RESTART " + line)
+	}
+	restartKind, _ := restartDiagnostic.LegacyResult()
 	liveDenied(t, next)
 	if nextSession.Close() != nil || nextLease.Finish(ctx) != nil {
 		t.Fatal("RESTART_SESSION=FAIL")

@@ -328,6 +328,45 @@ func TestRuntimeHomeSafeStageDiagnostics(t *testing.T) {
 
 type liveAccountSession struct{ request []byte }
 
+type diagnosticAccountSession struct{ wire string }
+
+func (*diagnosticAccountSession) Write([]byte) error { return nil }
+func (s *diagnosticAccountSession) Read() ([]byte, error) {
+	if s.wire == "" {
+		return nil, errors.New("SECRET_TRANSPORT")
+	}
+	return []byte(s.wire), nil
+}
+func (*diagnosticAccountSession) Close() error { return nil }
+
+func TestRuntimeHomeAccountStructuralDiagnostics(t *testing.T) {
+	unknown := RuntimeHomeAccountDiagnostics{classification: "SECRET", accountType: "SECRET", rpc: "SECRET"}
+	if lines := strings.Join(unknown.Lines(), "\n"); strings.Contains(lines, "SECRET") || !strings.Contains(lines, "classification=UNKNOWN") {
+		t.Fatal("unknown diagnostic did not fail closed")
+	}
+	for _, tc := range []struct{ wire, classification, signal string }{
+		{"", "ACCOUNT_READ_TRANSPORT_FAILURE", "ACCOUNT_READ_RPC=FAIL"},
+		{`{"id":99,"error":{"code":-32603,"message":"SECRET","data":{"token":"SECRET"}}}`, "ACCOUNT_READ_RPC_ERROR", "RPC_CODE=-32603"},
+		{`{"id":99,"error":{"code":-32603,"message":"workspace routing discovery failed"}}`, "WORKSPACE_ROUTING_FAILURE", "WORKSPACE_ROUTING=FAIL"},
+		{`{"id":99,"result":{"account":null,"requiresOpenaiAuth":true}}`, "ACCOUNT_READ_RESULT_ACCOUNT_NONE", "ACCOUNT_PRESENT=no"},
+		{`{"id":98,"result":{"account":null,"requiresOpenaiAuth":true}}`, "ACCOUNT_READ_RESULT_UNEXPECTED", "RESPONSE_CORRELATED=unknown"},
+		{`{"id":99,"result":{"account":{"type":"SECRET","email":"SECRET","planType":"SECRET"},"requiresOpenaiAuth":true}}`, "ACCOUNT_READ_RESULT_UNEXPECTED", "ACCOUNT_PRESENT=yes"},
+	} {
+		d := ReadRuntimeHomeAccountDiagnostics(context.Background(), &diagnosticAccountSession{tc.wire})
+		lines := strings.Join(d.Lines(), "\n")
+		if !strings.Contains(lines, "classification="+tc.classification) || !strings.Contains(lines, tc.signal) || strings.Contains(lines, "SECRET") {
+			t.Fatal("unsafe or incorrect account diagnostic")
+		}
+		if strings.Contains(fmt.Sprintf("%#v", d), "SECRET") {
+			t.Fatal("format leak")
+		}
+	}
+	d := ReadRuntimeHomeAccountDiagnostics(context.Background(), &liveAccountSession{})
+	if !strings.Contains(strings.Join(d.Lines(), "\n"), "ACCOUNT_TYPE=chatgpt") {
+		t.Fatal("valid account projection failed")
+	}
+}
+
 func (s *liveAccountSession) Write(b []byte) error { s.request = append([]byte(nil), b...); return nil }
 func (s *liveAccountSession) Read() ([]byte, error) {
 	var req struct {

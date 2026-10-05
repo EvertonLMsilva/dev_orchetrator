@@ -275,15 +275,107 @@ func (c *RuntimeHomeDockerContainer) fixedExec(ctx context.Context, cmd []string
 // Exposes only the existing account classifier. Raw errors and account identity
 // never cross this administrative boundary.
 func ReadRuntimeHomeAccount(ctx context.Context, session CodexExecutorSession) (string, *int64) {
-	err := requireCodexChatGPTAccount(codexContextTransport{ctx: ctx, session: session})
-	if err == nil {
+	return ReadRuntimeHomeAccountDiagnostics(ctx, session).LegacyResult()
+}
+
+// Facts are inferred only from branches reached by the existing strict reader.
+// No account payload, personal data, upstream text or projected shape is retained.
+type RuntimeHomeAccountDiagnostics struct {
+	classification, rpc, response, correlated, result, account, accountType, rpcError, routing string
+	code                                                                                       *int64
+}
+
+func (d RuntimeHomeAccountDiagnostics) Lines() []string {
+	allowed := func(value, fallback string, values ...string) string {
+		for _, v := range values {
+			if value == v {
+				return value
+			}
+		}
+		return fallback
+	}
+	d.classification = allowed(d.classification, "UNKNOWN", "PASS", "ACCOUNT_READ_TRANSPORT_FAILURE", "ACCOUNT_READ_RESULT_UNEXPECTED", "ACCOUNT_READ_RESULT_ACCOUNT_NONE", "ACCOUNT_READ_RPC_ERROR", "WORKSPACE_ROUTING_FAILURE")
+	d.rpc = allowed(d.rpc, "UNKNOWN", "PASS", "FAIL")
+	d.response = allowed(d.response, "UNKNOWN", "PASS", "FAIL")
+	d.routing = allowed(d.routing, "UNKNOWN", "PASS", "FAIL")
+	d.correlated = allowed(d.correlated, "unknown", "yes", "no")
+	d.result = allowed(d.result, "unknown", "yes", "no")
+	d.account = allowed(d.account, "unknown", "yes", "no")
+	d.rpcError = allowed(d.rpcError, "unknown", "yes", "no")
+	d.accountType = allowed(d.accountType, "UNKNOWN", "chatgpt")
+	return []string{"classification=" + d.classification, "ACCOUNT_READ_RPC=" + d.rpc, "ACCOUNT_READ_RESPONSE=" + d.response, "RESPONSE_CORRELATED=" + d.correlated, "RESULT_PRESENT=" + d.result, "ACCOUNT_PRESENT=" + d.account, "ACCOUNT_TYPE=" + d.accountType, "RPC_ERROR_PRESENT=" + d.rpcError, "RPC_CODE=" + func() string {
+		if d.code != nil {
+			return fmt.Sprint(*d.code)
+		}
+		return "none"
+	}(), "WORKSPACE_ROUTING=" + d.routing}
+}
+func (d RuntimeHomeAccountDiagnostics) Format(s fmt.State, _ rune) {
+	io.WriteString(s, strings.Join(d.Lines(), "\n"))
+}
+func (d RuntimeHomeAccountDiagnostics) LegacyResult() (string, *int64) {
+	if d.classification == "PASS" {
 		return "pass", nil
 	}
-	var diagnostic *CodexAccountReadError
-	if errors.As(err, &diagnostic) && diagnostic.Kind == "workspace_routing" {
-		return "workspace_routing", diagnostic.RPCCode
+	if d.classification == "WORKSPACE_ROUTING_FAILURE" {
+		return "workspace_routing", d.code
 	}
 	return "account_unavailable", nil
+}
+func ReadRuntimeHomeAccountDiagnostics(ctx context.Context, session CodexExecutorSession) RuntimeHomeAccountDiagnostics {
+	d := RuntimeHomeAccountDiagnostics{classification: "UNKNOWN", rpc: "UNKNOWN", response: "UNKNOWN", correlated: "unknown", result: "unknown", account: "unknown", accountType: "UNKNOWN", rpcError: "unknown", routing: "UNKNOWN"}
+	err := requireCodexChatGPTAccount(codexContextTransport{ctx: ctx, session: session})
+	if err == nil {
+		d.classification = "PASS"
+		d.rpc = "PASS"
+		d.response = "PASS"
+		d.correlated = "yes"
+		d.result = "yes"
+		d.account = "yes"
+		d.accountType = "chatgpt"
+		d.rpcError = "no"
+		return d
+	}
+	var diagnostic *CodexAccountReadError
+	if !errors.As(err, &diagnostic) {
+		return d
+	}
+	switch diagnostic.Kind {
+	case "transport":
+		d.classification = "ACCOUNT_READ_TRANSPORT_FAILURE"
+		d.rpc = "FAIL"
+	case "protocol_decode":
+		d.classification = "ACCOUNT_READ_RESULT_UNEXPECTED"
+		d.response = "FAIL"
+	case "rpc_error", "workspace_routing":
+		d.classification = "ACCOUNT_READ_RPC_ERROR"
+		d.rpc = "PASS"
+		d.response = "PASS"
+		d.correlated = "yes"
+		d.result = "no"
+		d.rpcError = "yes"
+		if diagnostic.RPCCode != nil {
+			code := *diagnostic.RPCCode
+			d.code = &code
+		}
+		if diagnostic.Kind == "workspace_routing" {
+			d.classification = "WORKSPACE_ROUTING_FAILURE"
+			d.routing = "FAIL"
+		}
+	case "account_unavailable", "wrong_account_type":
+		d.classification = "ACCOUNT_READ_RESULT_ACCOUNT_NONE"
+		d.rpc = "PASS"
+		d.response = "PASS"
+		d.correlated = "yes"
+		d.result = "yes"
+		d.account = "no"
+		d.rpcError = "no"
+		if diagnostic.Kind == "wrong_account_type" {
+			d.classification = "ACCOUNT_READ_RESULT_UNEXPECTED"
+			d.account = "yes"
+		}
+	}
+	return d
 }
 
 // DockerEnvironmentConfig describes the only authorized bind mount. It has no
