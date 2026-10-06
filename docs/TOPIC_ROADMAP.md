@@ -1,6 +1,6 @@
 # Roadmap operacional
 
-## Meta do MVP
+## Meta do MVP — registro histórico (estado atual abaixo)
 
 Concluir P0--P5 e validar o ciclo em um projeto piloto.
 
@@ -96,7 +96,7 @@ programática do Planner. P4 começa verificando interfaces oficiais
 atuais da OpenAI/Codex antes de qualquer adapter concreto. Não assumir
 antecipadamente API, SDK, CLI, app-server, exec-server, autenticação, sessão ou protocolo.
 
-## Regra
+## Regra histórica (granularidade atual abaixo)
 
 Executar somente a menor task desbloqueada. Detalhes estão em
 `docs/tasks/P*.md`.
@@ -118,3 +118,59 @@ Próximo tópico recomendado: **P6 — Authenticated Provider Runtime**.
 Fonte ChatGPT autorizada → app-server autenticado → Planner concreto → composition
 root → Discord operacional E2E. A prioridade/numeração do tópico Git histórico
 fica para o Planner. Nenhum runtime autenticado foi implementado neste fechamento.
+
+## Estado operacional reconciliado — 2026-10-06
+
+Este quadro substitui os estados iniciais/históricos acima. O fechamento P5
+continua válido como registro daquele momento; P6 já foi implementado parcialmente.
+
+| Tópico/capacidade | Estado atual | Gate restante |
+| --- | --- | --- |
+| P0–P4 | Implementação DONE conforme histórico | LIVE autenticado P4 não declarado resolvido |
+| P5 Orquestração | Application DONE | B-P5-001: composição de produção ainda indisponível |
+| P6 Authenticated Provider Runtime | IN_PROGRESS, branch/PR única | LIVE Planner → composição read-only → Discord E2E real |
+| Mediated WRITE / Git controlado (antigo P6 Git) | POSTERIOR | Mediação real e aprovações verificáveis; fora do gate E2E read-only |
+| P7–P9 | FUTURE | Refinamento posterior; não antecipar implementação |
+
+Fonte única da reconstrução, commits, subdivisões históricas, invariantes,
+componentes prováveis, testes, aceites e STOP conditions: docs/tasks/P6.md.
+P6.3d DONE em 70cf070 fecha somente WRITE simbólico. PlannerWriteDispatcher não
+medeia efeitos reais do Codex; filesystem/git WRITE real = DENY.
+
+Já implementados: fonte ChatGPT autorizada/sessão Docker, bootstrap device-code,
+persistência runtime-owned, account/read e diagnóstico seguro, adapter Planner
+concreto, runtime autenticado sem ferramentas e contrato WRITE simbólico.
+Implementação e harness opt-in não constituem prova de sucesso LIVE. main vazio
+impede composição operacional; teste LIVE local não rastreado não é entrega aceita.
+A causa histórica de B-P5-001 (ausência de Planner concreto) foi parcialmente
+superada; o blocker de produção permanece até fechamento dos gates P6.
+
+## Caminho restante até primeiro LIVE e Discord real
+
+| Entrega funcional | Dependências | Resultado verificável |
+| --- | --- | --- |
+| P6.4 Inferência autenticada LIVE controlada | Runtime atual, auth runtime-owned, Docker/Linux | Uma inferência real sem ferramentas, decisão válida, persistência/cleanup PASS e regressão GREEN |
+| P6.5 Composição operacional segura/read-only | P6.4 aceita, contratos P5, configuração autorizada | Entrypoint real e gate que impede Executor com efeitos e filesystem/git WRITE |
+| P6.6 Discord E2E real seguro/read-only | P6.4/P6.5 aceitas e autorização explícita do ensaio | Discord → Planner → evidência permitida → resposta correlacionada, sem mutação de projeto/Git |
+
+Distância: três entregas coesas; P6.4 comprova primeiro LIVE do Planner, P6.5
+libera iniciar Discord E2E, P6.6 comprova o ciclo real. Não exigir mediated WRITE
+para esse ensaio. Pedido de WRITE/PREPARE_EXECUTOR deve bloquear/escalar antes
+que alcance execução com efeitos. Não há autorização LIVE nesta atualização.
+
+P6 DONE exige os três aceites/evidências aprovados pelo Planner, regressão oficial
+./scripts/validate.sh Linux/Docker GREEN e reconciliação de B-P5-001 no escopo de
+runtime/composição. Não exige escrever uma task piloto nem operações Git reais.
+Mediated WRITE permanece capacidade posterior; objetivos, invariantes e STOP
+conditions estão em P6.md, sem reativar o antigo catálogo como tasks atuais.
+
+## Granularidade vigente
+
+Tópico pai = grande capacidade; subtópico = entrega funcional coesa.
+Discovery/RED/GREEN/implementação/regressão são etapas internas. Não criar task
+por teste, arquivo ou fase; autorização deve cobrir o ciclo completo refinado
+segundo TASK_SPEC. Preferir término em capacidade verificável, regressão GREEN
+e commit significativo. Uma capacidade por execução, sem refatoração lateral.
+P6 inteiro = uma branch/PR; subdivisões históricas são rastreabilidade.
+Dependência operacional atual: P5 application DONE → P6.4 → P6.5 → P6.6;
+mediated WRITE/Git, P7–P9 ficam posteriores e dependem de refinamento do Planner.
