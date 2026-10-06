@@ -120,7 +120,12 @@ func requireCodexChatGPTAccount(transport codexHandshakeTransport) error {
 				Email json.RawMessage `json:"email"`
 				Plan  string          `json:"planType"`
 			} `json:"account"`
-			RequiresAuth *bool `json:"requiresOpenaiAuth"`
+			RequiresAuth     *bool `json:"requiresOpenaiAuth"`
+			WorkspaceRouting *struct {
+				ChatGPTAccountID       *string `json:"chatgptAccountId"`
+				BackendOrigin          *string `json:"backendOrigin"`
+				AccountRoutingOverride *string `json:"accountRoutingOverride"`
+			} `json:"workspaceRouting"`
 		}
 		if len(envelope.Error) != 0 {
 			var rpc struct {
@@ -143,6 +148,16 @@ func requireCodexChatGPTAccount(transport codexHandshakeTransport) error {
 		if decodeCodexStrictObject(envelope.Result, &result) != nil || result.RequiresAuth == nil {
 			return failure
 		}
+		if routing := result.WorkspaceRouting; routing != nil {
+			if routing.ChatGPTAccountID == nil || routing.BackendOrigin == nil || routing.AccountRoutingOverride == nil {
+				return failure
+			}
+			switch *routing.AccountRoutingOverride {
+			case "NO_CONSTRAINT", "us", "us_cr":
+			default:
+				return failure
+			}
+		}
 		account := result.Account
 		if account == nil {
 			return accountReadFailure("account_unavailable", "account unavailable")
@@ -150,7 +165,7 @@ func requireCodexChatGPTAccount(transport codexHandshakeTransport) error {
 		if account.Type != "chatgpt" {
 			return accountReadFailure("wrong_account_type", "ChatGPT account required")
 		}
-		if account.Plan == "" || len(account.Email) == 0 {
+		if !validCodexAccountPlan(account.Plan) || len(account.Email) == 0 {
 			return failure
 		}
 		var email *string
@@ -160,4 +175,13 @@ func requireCodexChatGPTAccount(transport codexHandshakeTransport) error {
 		return nil
 	}
 	return failure
+}
+
+// PlanType wire values from rust-v0.159.2; never projected into diagnostics.
+func validCodexAccountPlan(plan string) bool {
+	switch plan {
+	case "free", "go", "plus", "pro", "prolite", "promax", "team", "self_serve_business_prolite", "self_serve_business_usage_based", "business", "ent26", "enterprise_cbp_automation", "enterprise_cbp_usage_based", "enterprise", "edu", "edu_plus", "edu_pro", "unknown":
+		return true
+	}
+	return false
 }

@@ -282,6 +282,7 @@ func ReadRuntimeHomeAccount(ctx context.Context, session CodexExecutorSession) (
 // Facts are inferred only from branches reached by the existing strict reader.
 // No account payload, personal data, upstream text or projected shape is retained.
 type RuntimeHomeAccountDiagnostics struct {
+	resultDecode                                                                               string
 	request                                                                                    string
 	classification, rpc, response, correlated, result, account, accountType, rpcError, routing string
 	code                                                                                       *int64
@@ -300,6 +301,7 @@ func (d RuntimeHomeAccountDiagnostics) Lines() []string {
 	d.request = allowed(d.request, "FAIL", "PASS", "FAIL")
 	d.rpc = allowed(d.rpc, "FAIL", "PASS", "FAIL")
 	d.response = allowed(d.response, "UNKNOWN", "PASS", "FAIL")
+	d.resultDecode = allowed(d.resultDecode, "UNKNOWN", "PASS", "FAIL")
 	d.routing = allowed(d.routing, "UNKNOWN", "PASS", "FAIL")
 	d.correlated = allowed(d.correlated, "no", "yes", "no")
 	d.result = allowed(d.result, "no", "yes", "no")
@@ -311,7 +313,7 @@ func (d RuntimeHomeAccountDiagnostics) Lines() []string {
 			return fmt.Sprint(*d.code)
 		}
 		return "none"
-	}(), "WORKSPACE_ROUTING=" + d.routing}
+	}(), "RESULT_DECODE=" + d.resultDecode, "WORKSPACE_ROUTING=" + d.routing}
 }
 func (d RuntimeHomeAccountDiagnostics) Format(s fmt.State, _ rune) {
 	io.WriteString(s, strings.Join(d.Lines(), "\n"))
@@ -330,6 +332,7 @@ func ReadRuntimeHomeAccountDiagnostics(ctx context.Context, session CodexExecuto
 	observer := runtimeAccountObserver{ctx: ctx, session: session, diagnostic: &d}
 	err := requireCodexChatGPTAccount(&observer)
 	if err == nil {
+		d.resultDecode = "PASS"
 		d.classification = "PASS"
 		d.rpc = "PASS"
 		d.response = "PASS"
@@ -354,11 +357,17 @@ func ReadRuntimeHomeAccountDiagnostics(ctx context.Context, session CodexExecuto
 		if d.classification == "ACCOUNT_READ_LOCAL_FAILURE" {
 			d.classification = "ACCOUNT_READ_RESULT_UNEXPECTED"
 		}
-		d.rpc = "FAIL"
-		d.response = "FAIL"
+		if d.correlated == "yes" && d.result == "yes" && d.rpcError == "no" {
+			d.rpc = "PASS"
+			d.response = "PASS"
+			d.resultDecode = "FAIL"
+		} else {
+			d.rpc = "FAIL"
+			d.response = "FAIL"
+		}
 	case "rpc_error", "workspace_routing":
 		d.classification = "ACCOUNT_READ_RPC_ERROR"
-		d.rpc = "PASS"
+		d.rpc = "FAIL"
 		d.response = "PASS"
 		d.correlated = "yes"
 		d.result = "no"
@@ -372,6 +381,7 @@ func ReadRuntimeHomeAccountDiagnostics(ctx context.Context, session CodexExecuto
 			d.routing = "FAIL"
 		}
 	case "account_unavailable", "wrong_account_type":
+		d.resultDecode = "PASS"
 		d.classification = "ACCOUNT_READ_RESULT_ACCOUNT_NONE"
 		d.rpc = "PASS"
 		d.response = "PASS"
@@ -380,6 +390,7 @@ func ReadRuntimeHomeAccountDiagnostics(ctx context.Context, session CodexExecuto
 		d.account = "no"
 		d.rpcError = "no"
 		if diagnostic.Kind == "wrong_account_type" {
+			d.resultDecode = "FAIL"
 			d.classification = "ACCOUNT_READ_RESULT_UNEXPECTED"
 			d.account = "yes"
 		}

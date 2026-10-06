@@ -349,7 +349,7 @@ func TestPersistedAccountReadLifecycle(t *testing.T) {
 			f := &persistedReadFixture{responses: [][]byte{[]byte(`{"id":1,"result":{"userAgent":"fixture","codexHome":"/run/codex-auth","platformFamily":"unix","platformOs":"linux"}}`), []byte(tc.response)}}
 			var lines []string
 			ok := runPersistedAccountRead(context.Background(), s, f, func(line string) { lines = append(lines, line) })
-			if ok != (tc.name != "malformed") {
+			if ok != (tc.name == "account" || tc.name == "none") {
 				t.Fatal("RPC failure hidden by successful persistence")
 			}
 			output := strings.Join(lines, "\n")
@@ -450,7 +450,7 @@ func runPersistedAccountRead(ctx context.Context, store *CodexRuntimeHome, c per
 	for _, line := range d.Lines() {
 		key, value, _ := strings.Cut(line, "=")
 		switch key {
-		case "classification", "ACCOUNT_READ_REQUEST", "ACCOUNT_READ_RPC", "RESPONSE_CORRELATED", "RESULT_PRESENT", "ACCOUNT_PRESENT", "ACCOUNT_TYPE", "RPC_ERROR_PRESENT", "RPC_CODE", "WORKSPACE_ROUTING":
+		case "classification", "ACCOUNT_READ_REQUEST", "ACCOUNT_READ_RPC", "RESULT_DECODE", "RESPONSE_CORRELATED", "RESULT_PRESENT", "ACCOUNT_PRESENT", "ACCOUNT_TYPE", "RPC_ERROR_PRESENT", "RPC_CODE", "WORKSPACE_ROUTING":
 			facts[key] = value
 			report(line)
 		}
@@ -463,7 +463,7 @@ func runPersistedAccountRead(ctx context.Context, store *CodexRuntimeHome, c per
 		verdict = "REPRODUCED_WITH_FRESH_RUNTIME_SESSION"
 	}
 	report("B_P4_001=" + verdict)
-	return facts["ACCOUNT_READ_REQUEST"] == "PASS" && facts["ACCOUNT_READ_RPC"] == "PASS"
+	return facts["ACCOUNT_READ_REQUEST"] == "PASS" && facts["ACCOUNT_READ_RPC"] == "PASS" && facts["RESULT_DECODE"] == "PASS"
 }
 
 func TestPersistedAccountReadLiveOptIn(t *testing.T) {

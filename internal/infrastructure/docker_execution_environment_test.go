@@ -398,6 +398,55 @@ type deterministicAccountSession struct {
 	closed            chan struct{}
 }
 
+func TestAccountReadOfficialContract(t *testing.T) {
+	const account = `"account":{"type":"chatgpt","email":null,"planType":"plus"},"requiresOpenaiAuth":true`
+	for _, tc := range []struct{ name, result, decode string }{
+		{"official_shape", `{` + account + `}`, "PASS"},
+		{"workspace_absent", `{` + account + `}`, "PASS"},
+		{"workspace_null", `{` + account + `,"workspaceRouting":null}`, "PASS"},
+		{"workspace_valid", `{` + account + `,"workspaceRouting":{"chatgptAccountId":"synthetic","backendOrigin":"https://example.invalid","accountRoutingOverride":"NO_CONSTRAINT"}}`, "PASS"},
+		{"enum_us", `{` + account + `,"workspaceRouting":{"chatgptAccountId":"synthetic","backendOrigin":"https://example.invalid","accountRoutingOverride":"us"}}`, "PASS"},
+		{"enum_us_cr", `{` + account + `,"workspaceRouting":{"chatgptAccountId":"synthetic","backendOrigin":"https://example.invalid","accountRoutingOverride":"us_cr"}}`, "PASS"},
+		{"invalid_enum", `{` + account + `,"workspaceRouting":{"chatgptAccountId":"synthetic","backendOrigin":"synthetic","accountRoutingOverride":"SECRET_INVALID"}}`, "FAIL"},
+		{"wrong_workspace_type", `{` + account + `,"workspaceRouting":false}`, "FAIL"},
+		{"missing_nested_id", `{` + account + `,"workspaceRouting":{"backendOrigin":"synthetic","accountRoutingOverride":"us"}}`, "FAIL"},
+		{"missing_nested_origin", `{` + account + `,"workspaceRouting":{"chatgptAccountId":"synthetic","accountRoutingOverride":"us"}}`, "FAIL"},
+		{"missing_nested_enum", `{` + account + `,"workspaceRouting":{"chatgptAccountId":"synthetic","backendOrigin":"synthetic"}}`, "FAIL"},
+		{"unknown_nested", `{` + account + `,"workspaceRouting":{"chatgptAccountId":"synthetic","backendOrigin":"synthetic","accountRoutingOverride":"us","SECRET_FIELD":true}}`, "FAIL"},
+		{"wrong_nested_type", `{` + account + `,"workspaceRouting":{"chatgptAccountId":7,"backendOrigin":"synthetic","accountRoutingOverride":"us"}}`, "FAIL"},
+		{"unknown_result_field", `{` + account + `,"SECRET_FIELD":true}`, "FAIL"},
+		{"missing_required_email", `{"account":{"type":"chatgpt","planType":"plus"},"requiresOpenaiAuth":true}`, "FAIL"},
+		{"missing_required_discriminator", `{"account":{"email":null,"planType":"plus"},"requiresOpenaiAuth":true}`, "FAIL"},
+		{"unknown_account_field", `{"account":{"type":"chatgpt","email":null,"planType":"plus","SECRET_FIELD":true},"requiresOpenaiAuth":true}`, "FAIL"},
+		{"wrong_plan_type", `{"account":{"type":"chatgpt","email":null,"planType":7},"requiresOpenaiAuth":true}`, "FAIL"},
+		{"wrong_auth_type", `{"account":{"type":"chatgpt","email":null,"planType":"plus"},"requiresOpenaiAuth":"SECRET"}`, "FAIL"},
+		{"missing_required_plan", `{"account":{"type":"chatgpt","email":null},"requiresOpenaiAuth":true}`, "FAIL"},
+		{"missing_required_auth", `{"account":{"type":"chatgpt","email":null,"planType":"plus"}}`, "FAIL"},
+		{"wrong_discriminator", `{"account":{"type":"SECRET_INVALID","email":null,"planType":"plus"},"requiresOpenaiAuth":true}`, "FAIL"},
+		{"wrong_field_type", `{"account":{"type":"chatgpt","email":7,"planType":"plus"},"requiresOpenaiAuth":true}`, "FAIL"},
+		{"invalid_plan_enum", `{"account":{"type":"chatgpt","email":null,"planType":"SECRET_INVALID"},"requiresOpenaiAuth":true}`, "FAIL"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			d := ReadRuntimeHomeAccountDiagnostics(context.Background(), &diagnosticAccountSession{`{"id":99,"result":` + tc.result + `}`})
+			lines := strings.Join(d.Lines(), "\n")
+			if !strings.Contains(lines, "ACCOUNT_READ_RPC=PASS") || !strings.Contains(lines, "RESULT_DECODE="+tc.decode) || strings.Contains(lines, "SECRET") || strings.Contains(lines, "synthetic") {
+				t.Fatal("contract or sanitized semantics incorrect")
+			}
+			kind, _ := d.LegacyResult()
+			if (kind == "pass") != (tc.decode == "PASS") {
+				t.Fatal("contract accepted invalid result or rejected official result")
+			}
+		})
+	}
+	t.Run("rpc_error_semantics", func(t *testing.T) {
+		d := ReadRuntimeHomeAccountDiagnostics(context.Background(), &diagnosticAccountSession{`{"id":99,"error":{"code":-32603,"message":"SECRET_ERROR"}}`})
+		lines := strings.Join(d.Lines(), "\n")
+		if !strings.Contains(lines, "ACCOUNT_READ_RPC=FAIL") || !strings.Contains(lines, "RESULT_DECODE=UNKNOWN") || !strings.Contains(lines, "RPC_CODE=-32603") || strings.Contains(lines, "SECRET") {
+			t.Fatal("RPC failure semantics incorrect")
+		}
+	})
+}
+
 func (s *deterministicAccountSession) Write([]byte) error {
 	s.written = s.writeErr == nil
 	return s.writeErr
@@ -422,7 +471,7 @@ func (s *deterministicAccountSession) Close() error {
 }
 
 func TestAccountReadDeterministicDiagnostics(t *testing.T) {
-	success := `{"id":99,"result":{"account":{"type":"chatgpt","email":"SECRET_EMAIL","planType":"SECRET_PLAN"},"requiresOpenaiAuth":true}}`
+	success := `{"id":99,"result":{"account":{"type":"chatgpt","email":"SECRET_EMAIL","planType":"plus"},"requiresOpenaiAuth":true}}`
 	notification := `{"method":"account/updated","params":{"SECRET":"SECRET_TOKEN"}}`
 	for _, tc := range []struct {
 		name                            string
@@ -431,7 +480,7 @@ func TestAccountReadDeterministicDiagnostics(t *testing.T) {
 		rpc, classification, correlated string
 	}{
 		{"correlated_success", []string{success}, nil, "PASS", "PASS", "yes"},
-		{"rpc_error", []string{`{"id":99,"error":{"code":-32603,"message":"SECRET_ERROR","data":"SECRET_DATA"}}`}, nil, "PASS", "ACCOUNT_READ_RPC_ERROR", "yes"},
+		{"rpc_error", []string{`{"id":99,"error":{"code":-32603,"message":"SECRET_ERROR","data":"SECRET_DATA"}}`}, nil, "FAIL", "ACCOUNT_READ_RPC_ERROR", "yes"},
 		{"eof", nil, io.EOF, "FAIL", "ACCOUNT_READ_EOF", "no"},
 		{"timeout", nil, context.DeadlineExceeded, "FAIL", "ACCOUNT_READ_TIMEOUT", "no"},
 		{"malformed", []string{`{"SECRET_BODY"`}, nil, "FAIL", "ACCOUNT_READ_ENVELOPE_INVALID", "no"},
@@ -442,8 +491,8 @@ func TestAccountReadDeterministicDiagnostics(t *testing.T) {
 		{"server_request", []string{`{"id":7,"method":"SECRET_METHOD","params":{"token":"SECRET"}}`}, nil, "FAIL", "ACCOUNT_READ_SERVER_REQUEST", "no"},
 		{"account_absent", []string{`{"id":99,"result":{"account":null,"requiresOpenaiAuth":true}}`}, nil, "PASS", "ACCOUNT_READ_RESULT_ACCOUNT_NONE", "yes"},
 		{"unexpected_account_type", []string{`{"id":99,"result":{"account":{"type":"SECRET","email":"SECRET","planType":"SECRET"},"requiresOpenaiAuth":true}}`}, nil, "PASS", "ACCOUNT_READ_RESULT_UNEXPECTED", "yes"},
-		{"workspace_routing", []string{`{"id":99,"error":{"code":-32603,"message":"workspace routing discovery failed"}}`}, nil, "PASS", "WORKSPACE_ROUTING_FAILURE", "yes"},
-		{"result_decode", []string{`{"id":99,"result":{"SECRET_FIELD":"SECRET_VALUE"}}`}, nil, "FAIL", "ACCOUNT_READ_RESULT_UNEXPECTED", "yes"},
+		{"workspace_routing", []string{`{"id":99,"error":{"code":-32603,"message":"workspace routing discovery failed"}}`}, nil, "FAIL", "WORKSPACE_ROUTING_FAILURE", "yes"},
+		{"result_decode", []string{`{"id":99,"result":{"SECRET_FIELD":"SECRET_VALUE"}}`}, nil, "PASS", "ACCOUNT_READ_RESULT_UNEXPECTED", "yes"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			s := &deterministicAccountSession{wires: tc.wires, readErr: tc.readErr}
