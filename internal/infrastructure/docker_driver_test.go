@@ -26,6 +26,33 @@ import (
 
 const codexRuntimeSmokeImage = "dev-orchestrator-codex-runtime:0.159.2"
 
+func TestDockerStopAppServerPreservesContainer(t *testing.T) {
+	for _, running := range []bool{false, true} {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.Method != http.MethodGet || !strings.HasSuffix(r.URL.Path, "/exec/owned-exec/json") {
+				t.Error("stop/remove container forbidden for lease transport")
+				w.WriteHeader(500)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprintf(w, `{"Running":%t,"ExitCode":0}`, running)
+		}))
+		sdk, err := client.New(client.WithHost("tcp://"+strings.TrimPrefix(server.URL, "http://")), client.WithAPIVersion("1.56"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		d := &DockerDriver{client: sdk}
+		ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+		err = d.stopCodexAppServer(ctx, "container", "owned-exec")
+		cancel()
+		if (err != nil) != running {
+			t.Error("process exit not confirmed")
+		}
+		sdk.Close()
+		server.Close()
+	}
+}
+
 func TestDockerCodexSessionFixedOptions(t *testing.T) {
 	for _, workspace := range []string{"/trusted/a", "/trusted/b"} {
 		opts := codexSessionCreateOptions(DockerEnvironmentConfig{workspace: workspace})
@@ -170,7 +197,7 @@ func TestCodexRuntimeImageContract(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := "FROM node:22.14.0-bookworm-slim@sha256:1c18d9ab3af4585870b92e4dbc5cac5a0dc77dd13df1a5905cea89fc720eb05b\n\nRUN npm install --global --ignore-scripts @openai/codex@0.159.2\n\nWORKDIR /workspace\nENV CODEX_HOME=/run/codex-process\nRUN mkdir -p /run/codex-process\nCMD [\"/bin/sleep\", \"300\"]\n"
+	want := "FROM node:22.14.0-bookworm-slim@sha256:1c18d9ab3af4585870b92e4dbc5cac5a0dc77dd13df1a5905cea89fc720eb05b\n\nRUN apt-get update \\\n    && apt-get install -y --no-install-recommends ca-certificates \\\n    && rm -rf /var/lib/apt/lists/*\n\nRUN npm install --global --ignore-scripts @openai/codex@0.159.2\n\nWORKDIR /workspace\nENV CODEX_HOME=/run/codex-process\nRUN mkdir -p /run/codex-process\nCMD [\"/bin/sleep\", \"300\"]\n"
 	if strings.ReplaceAll(string(data), "\r\n", "\n") != want {
 		t.Fatal("runtime build must remain pinned and credential-free")
 	}

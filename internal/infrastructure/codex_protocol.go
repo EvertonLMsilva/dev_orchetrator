@@ -1047,28 +1047,46 @@ func codexObject(data []byte) bool {
 	return len(data) > 0 && data[0] == '{'
 }
 
+// Correlation is shared by every RPC consumer, independently of its result
+// schema. A server request is never a notification. Unexpected response IDs
+// fail closed because this client has only one outstanding request at a time.
+func decodeCodexCorrelatedEnvelope(data []byte, expectedID *CodexRequestID) (codexEnvelope, bool, error) {
+	invalid := errors.New("codex protocol: malformed or uncorrelated envelope")
+	var envelope codexEnvelope
+	if decodeCodexStrictObject(data, &envelope) != nil {
+		return codexEnvelope{}, false, invalid
+	}
+	if len(envelope.Method) > 0 {
+		var method string
+		if len(envelope.ID) > 0 || len(envelope.Result) > 0 || len(envelope.Error) > 0 || !codexObject(envelope.Params) || json.Unmarshal(envelope.Method, &method) != nil || method == "" {
+			return codexEnvelope{}, false, invalid
+		}
+		return envelope, true, nil
+	}
+	if envelope.EmittedAtMs.present || expectedID == nil || expectedID.kind == 0 || len(envelope.Params) > 0 || (len(envelope.Result) > 0) == (len(envelope.Error) > 0) {
+		return codexEnvelope{}, false, invalid
+	}
+	var id CodexRequestID
+	if json.Unmarshal(envelope.ID, &id) != nil || id != *expectedID || len(envelope.Result) > 0 && !codexObject(envelope.Result) {
+		return codexEnvelope{}, false, invalid
+	}
+	return envelope, false, nil
+}
+
 // DecodeCodexMessage decodes one message, never a stream or a server request.
 // Unknown notifications fail closed; none are silently treated as completion.
 // The caller owns outstanding-request lifecycle and supplies correlation metadata.
 func DecodeCodexMessage(data []byte, expected *CodexResponseExpectation) (CodexMessage, error) {
 	invalid := errors.New("codex protocol: malformed or unsupported message")
-	if !codexObject(data) {
-		return CodexMessage{}, invalid
+	var expectedID *CodexRequestID
+	if expected != nil {
+		expectedID = &expected.ID
 	}
-	var envelope codexEnvelope
-	decoder := json.NewDecoder(bytes.NewReader(data))
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(&envelope); err != nil {
-		return CodexMessage{}, fmt.Errorf("codex protocol envelope: %w", err)
+	envelope, notification, err := decodeCodexCorrelatedEnvelope(data, expectedID)
+	if err != nil {
+		return CodexMessage{}, err
 	}
-	var extra json.RawMessage
-	if err := decoder.Decode(&extra); err != io.EOF {
-		return CodexMessage{}, invalid
-	}
-	if len(envelope.Method) > 0 {
-		if len(envelope.ID) > 0 || len(envelope.Result) > 0 || len(envelope.Error) > 0 || !codexObject(envelope.Params) {
-			return CodexMessage{}, invalid
-		}
+	if notification {
 		var method CodexMethod
 		if err := json.Unmarshal(envelope.Method, &method); err != nil {
 			return CodexMessage{}, invalid
@@ -1079,13 +1097,10 @@ func DecodeCodexMessage(data []byte, expected *CodexResponseExpectation) (CodexM
 		}
 		return message, err
 	}
-	if envelope.EmittedAtMs.present || expected == nil || expected.ID.kind == 0 || !codexResponseMethod(expected.Method) || len(envelope.Params) > 0 || (len(envelope.Result) > 0) == (len(envelope.Error) > 0) {
+	if expected == nil || !codexResponseMethod(expected.Method) {
 		return CodexMessage{}, invalid
 	}
-	var id CodexRequestID
-	if err := json.Unmarshal(envelope.ID, &id); err != nil || id != expected.ID {
-		return CodexMessage{}, invalid
-	}
+	id := expected.ID
 	if len(envelope.Error) > 0 {
 		var detail struct {
 			Code    *int64  `json:"code"`

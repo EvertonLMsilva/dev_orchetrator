@@ -1,0 +1,40 @@
+[package]
+name = "codex-planner-host"
+version = "0.1.0"
+edition = "2024"
+
+# Full upstream debug symbols make the small host's link unnecessarily large.
+[profile.dev]
+debug = 0
+
+[profile.test]
+debug = 0
+
+[dependencies]
+codex-core = { git = "https://github.com/openai/codex", tag = "rust-v0.159.2" }
+codex-extension-api = { git = "https://github.com/openai/codex", tag = "rust-v0.159.2" }
+codex-login = { git = "https://github.com/openai/codex", tag = "rust-v0.159.2" }
+codex-exec-server = { git = "https://github.com/openai/codex", tag = "rust-v0.159.2" }
+codex-protocol = { git = "https://github.com/openai/codex", tag = "rust-v0.159.2" }
+codex-features = { git = "https://github.com/openai/codex", tag = "rust-v0.159.2" }
+codex-api = { git = "https://github.com/openai/codex", tag = "rust-v0.159.2" }
+codex-model-provider = { git = "https://github.com/openai/codex", tag = "rust-v0.159.2" }
+codex-http-client = { git = "https://github.com/openai/codex", tag = "rust-v0.159.2" }
+codex-models-manager = { git = "https://github.com/openai/codex", tag = "rust-v0.159.2" }
+eventsource-stream = "=0.2.3"
+tokio = { version = "1.49.0", features = ["macros", "rt-multi-thread", "io-std", "io-util", "time", "sync", "net"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["raw_value"] }
+toml = "0.9.5"
+
+[dev-dependencies]
+tempfile = "3"
+zstd = "0.13"
+
+[patch.crates-io]
+crossterm = { git = "https://github.com/openai-oss-forks/crossterm", rev = "efa177859fd9623d57b9fe7ae9bf491ae1ac6ec4" }
+tokio-tungstenite = { git = "https://github.com/openai-oss-forks/tokio-tungstenite", rev = "0e5b2d73aa18dd9f0a50ee9ff199d5aef7594186" }
+tungstenite = { git = "https://github.com/openai-oss-forks/tungstenite-rs", rev = "4fffad30fe373adbdcffab9545e9e9bf4f2fc19f" }
+
+[patch."ssh://git@github.com/openai-oss-forks/tungstenite-rs.git"]
+tungstenite = { git = "https://github.com/openai-oss-forks/tungstenite-rs", rev = "4fffad30fe373adbdcffab9545e9e9bf4f2fc19f" }

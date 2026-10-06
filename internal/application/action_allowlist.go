@@ -6,6 +6,7 @@ import "dev-orchestrator/internal/domain"
 // authorization policy. Its zero value denies every capability.
 type ActionAllowlist struct {
 	defaultsEnabled bool
+	readOnly        bool
 }
 
 // NewDefaultActionAllowlist enables exactly the five MVP capabilities.
@@ -14,10 +15,18 @@ func NewDefaultActionAllowlist() ActionAllowlist {
 	return ActionAllowlist{defaultsEnabled: true}
 }
 
+// NewReadOnlyActionAllowlist excludes test execution, which may mutate projects.
+func NewReadOnlyActionAllowlist() ActionAllowlist {
+	return ActionAllowlist{defaultsEnabled: true, readOnly: true}
+}
+
 // Allows checks support only; it neither authorizes nor executes an action.
 // New domain action types remain denied until explicitly registered here.
 func (a ActionAllowlist) Allows(actionType domain.ActionType) bool {
 	if !a.defaultsEnabled {
+		return false
+	}
+	if a.readOnly && actionType == domain.ActionTypeRunTests {
 		return false
 	}
 	switch actionType {

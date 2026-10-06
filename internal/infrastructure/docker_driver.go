@@ -46,11 +46,17 @@ func NewDockerDriver() (*DockerDriver, error) {
 func (d *DockerDriver) Close() error { return d.client.Close() }
 
 func codexSessionCreateOptions(c DockerEnvironmentConfig) client.ContainerCreateOptions {
-	return client.ContainerCreateOptions{
+	opts := client.ContainerCreateOptions{
 		Config:     &container.Config{Image: codexRuntimeImage, WorkingDir: c.WorkingDirectory(), Cmd: []string{"/bin/sleep", "300"}},
 		HostConfig: &container.HostConfig{Privileged: false, NetworkMode: "none", Mounts: []mount.Mount{{Type: mount.TypeBind, Source: c.WorkspaceSource(), Target: c.WorkspaceTarget()}}},
 		Platform:   &ocispec.Platform{OS: "linux"},
 	}
+	if c.authTmpfs {
+		opts.HostConfig.Mounts = append(opts.HostConfig.Mounts, mount.Mount{Type: mount.TypeTmpfs, Target: c.AuthTmpfsTarget(), TmpfsOptions: &mount.TmpfsOptions{Mode: 0700}})
+		opts.HostConfig.CapDrop = []string{"ALL"}
+		opts.HostConfig.SecurityOpt = []string{"no-new-privileges:true"}
+	}
+	return opts
 }
 
 func (d *DockerDriver) createCodexContainer(ctx context.Context, c DockerEnvironmentConfig) (string, error) {
@@ -280,6 +286,33 @@ func (d *DockerDriver) stopCodexProcess(ctx context.Context, containerID, execID
 		return errors.New("codex process stop/inspect failed")
 	}
 	return nil
+}
+
+// stdin EOF initiates app-server shutdown. Confirm it without stopping the
+// lease-owned container: its tmpfs must survive until capture has completed.
+// Failure is closed; the lease must abort rather than capture a running writer.
+func (d *DockerDriver) stopCodexAppServer(ctx context.Context, containerID, execID string) error {
+	ctx, cancel := context.WithTimeout(ctx, dockerOperationTimeout)
+	defer cancel()
+	if d == nil || d.client == nil || containerID == "" || execID == "" {
+		return errors.New("codex process termination unavailable")
+	}
+	ticker := time.NewTicker(10 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		result, err := d.client.ExecInspect(ctx, execID, client.ExecInspectOptions{})
+		if err != nil {
+			return errors.New("codex process termination unconfirmed")
+		}
+		if !result.Running {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return errors.New("codex process termination timeout")
+		case <-ticker.C:
+		}
+	}
 }
 
 type codexProcessStdin struct{ conn net.Conn }

@@ -24,7 +24,10 @@ type CodexExecutorSession interface {
 // callers cannot select image, commands, mounts or authentication.
 type CodexExecutorSessionFactory func(context.Context, DockerEnvironmentConfig) (CodexExecutorSession, error)
 
-type CodexExecutorRuntime struct{ start CodexExecutorSessionFactory }
+type CodexExecutorRuntime struct {
+	start         CodexExecutorSessionFactory
+	authenticated bool
+}
 
 var _ ports.ExecutorRuntime = (*CodexExecutorRuntime)(nil)
 var _ CodexExecutorSession = (*CodexProcessTransport)(nil)
@@ -95,6 +98,11 @@ func (r *CodexExecutorRuntime) Execute(ctx context.Context, request ports.Runtim
 	ready, handshakeErr := completeCodexHandshake(transport)
 	if handshakeErr != nil {
 		return result, errors.New("codex executor handshake failed")
+	}
+	if r.authenticated {
+		if err := requireCodexChatGPTAccount(transport); err != nil {
+			return result, err
+		}
 	}
 	thread, threadErr := ready.StartThread()
 	if threadErr != nil {

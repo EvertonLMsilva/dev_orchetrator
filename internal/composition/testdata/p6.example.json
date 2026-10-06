@@ -1,0 +1,20 @@
+{
+  "StateDir": "/var/lib/dev-orchestrator/state",
+  "ApplicationID": "123456789",
+  "RequestTimeout": "75s",
+  "ShutdownTimeout": "60s",
+  "MaxIntentBytes": 4096,
+  "MaxEvidenceBytes": 32768,
+  "Projects": [{
+    "ID": "pilot",
+    "Name": "Authorized read-only pilot",
+    "Workspace": "/pilot",
+    "Evidence": {
+      "READ_FILE": {"ReadFile": {"Path": "public-evidence/README.md"}},
+      "SEARCH": {"Search": {"Query": "status", "Path": "public-evidence"}},
+      "GIT_STATUS": {},
+      "GIT_DIFF": {"GitDiff": {"Path": "public-evidence/README.md"}}
+    }
+  }],
+  "Routes": [{"Source": {"GuildID": "123456789", "ChannelID": "987654321"}, "ProjectID": "pilot"}]
+}
