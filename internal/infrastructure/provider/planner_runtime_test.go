@@ -12,10 +12,12 @@ import (
 
 type plannerMemoryContainer struct {
 	memoryRuntimeHome
-	mode string
+	mode           string
+	inferenceCalls int
 }
 
 func (c *plannerMemoryContainer) Infer(ctx context.Context, _ infrastructure.PlannerRuntimeRequest) (infrastructure.PlannerRuntimeResult, error) {
+	c.inferenceCalls++
 	if c.mode == "wait" {
 		<-ctx.Done()
 		return infrastructure.PlannerRuntimeResult{}, ctx.Err()
@@ -71,6 +73,9 @@ func TestPlannerRuntimeCommitAfterLifecycle(t *testing.T) {
 			}
 			if err != nil && strings.Contains(err.Error(), "SECRET") {
 				t.Fatal("diagnostic leaked")
+			}
+			if c.inferenceCalls > 1 {
+				t.Fatal("second inference after failure")
 			}
 			if stage == "refresh" {
 				data, readErr := store.read()

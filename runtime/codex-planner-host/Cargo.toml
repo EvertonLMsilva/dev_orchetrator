@@ -17,6 +17,11 @@ codex-login = { git = "https://github.com/openai/codex", tag = "rust-v0.159.2" }
 codex-exec-server = { git = "https://github.com/openai/codex", tag = "rust-v0.159.2" }
 codex-protocol = { git = "https://github.com/openai/codex", tag = "rust-v0.159.2" }
 codex-features = { git = "https://github.com/openai/codex", tag = "rust-v0.159.2" }
+codex-api = { git = "https://github.com/openai/codex", tag = "rust-v0.159.2" }
+codex-model-provider = { git = "https://github.com/openai/codex", tag = "rust-v0.159.2" }
+codex-http-client = { git = "https://github.com/openai/codex", tag = "rust-v0.159.2" }
+codex-models-manager = { git = "https://github.com/openai/codex", tag = "rust-v0.159.2" }
+eventsource-stream = "=0.2.3"
 tokio = { version = "1.49.0", features = ["macros", "rt-multi-thread", "io-std", "io-util", "time", "sync", "net"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["raw_value"] }

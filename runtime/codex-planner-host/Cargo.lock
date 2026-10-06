@@ -2687,12 +2687,17 @@ dependencies = [
 name = "codex-planner-host"
 version = "0.1.0"
 dependencies = [
+ "codex-api",
  "codex-core",
  "codex-exec-server",
  "codex-extension-api",
  "codex-features",
+ "codex-http-client",
  "codex-login",
+ "codex-model-provider",
+ "codex-models-manager",
  "codex-protocol",
+ "eventsource-stream",
  "serde",
  "serde_json",
  "tempfile",

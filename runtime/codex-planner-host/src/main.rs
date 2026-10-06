@@ -10,12 +10,27 @@ fn main() {
     if runtime.block_on(runtime.spawn(async_main())).is_err() {std::process::exit(1)}
 }
 async fn async_main() {
+    if std::env::args().nth(1).as_deref()==Some("--probe-handshake") && std::env::args_os().len()==2 {
+        let result = async {
+            let config = planner_config(std::path::Path::new("/run/codex-auth"),"Planner transport diagnostic").await?;
+            let auth = runtime_auth(&config).await?;
+            Ok::<_,HostError>(codex_planner_host::probe_handshake(&config,auth).await)
+        }.await;
+        let report = match result {
+            Ok(report)=>report,
+            Err(_)=>codex_planner_host::ProbeEvidence {auth_available:false,ws_handshake:"UNKNOWN",http_class:"UNKNOWN",ws_close_class:"UNKNOWN",inference_sent:false},
+        };
+        let mut bytes=serde_json::to_vec(&report).unwrap(); bytes.push(b'\n');
+        let mut stdout=tokio::io::stdout();
+        let failed=stdout.write_all(&bytes).await.is_err() || stdout.flush().await.is_err();
+        std::process::exit(if failed {1}else{0});
+    }
     let outcome = tokio::time::timeout(std::time::Duration::from_secs(60), run())
         .await
         .unwrap_or(Err(HostError::Timeout));
     let (response, failed) = match outcome {
         Ok(output) => (
-            serde_json::json!({"version":1,"structuredOutput":serde_json::from_str::<serde_json::Value>(&output).unwrap()}),
+            serde_json::json!({"version":1,"structuredOutput":serde_json::from_str::<serde_json::Value>(&output).unwrap(),"evidence":{"auth":"runtime_owned","inference_attempt":1,"request_max_retries":0,"stream_max_retries":0,"tools_policy":"empty","tools_observed":0,"cleanup":"pass"}}),
             false,
         ),
         Err(error) => (serde_json::json!({"version":1,"error":error}), true),
@@ -29,7 +44,9 @@ async fn async_main() {
     std::process::exit(if failed || write_failed { 1 } else { 0 })
 }
 async fn run() -> Result<String, HostError> {
-    if std::env::args_os().len() != 1 {
+    let http_diagnostic=std::env::args_os().len()==2 && std::env::args().nth(1).as_deref()==Some("--http-sse-diagnostic");
+    let response_diagnostic=std::env::args_os().len()==2 && std::env::args().nth(1).as_deref()==Some("--response-diagnostic");
+    if std::env::args_os().len() != 1 && !http_diagnostic && !response_diagnostic {
         return Err(HostError::InvalidRequest);
     }
     let mut stdin = tokio::io::stdin();
@@ -48,12 +65,14 @@ async fn run() -> Result<String, HostError> {
         frame.push(byte);
     }
     let request = decode_request(&frame)?;
-    let config = planner_config(
+    let mut config = planner_config(
         std::path::Path::new("/run/codex-auth"),
         request.instructions(),
     )
     .await?;
+    if http_diagnostic { config.model_provider.supports_websockets=false; }
     let auth = runtime_auth(&config).await?;
+    if response_diagnostic { return codex_planner_host::diagnose_response(&request,&config,auth).await; }
     let (tx, rx) = tokio::sync::oneshot::channel();
     let monitor = tokio::spawn(async move {
         let error = match stdin.read_u8().await {

@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"time"
 	"unicode/utf8"
 
 	"github.com/moby/moby/client"
@@ -17,7 +18,68 @@ const plannerHostImage = "dev-orchestrator-codex-planner-runtime:0.159.2"
 
 // PlannerHostContainer exposes inference and RuntimeHome lifecycle only.
 // Image, argv, egress, mounts and tool policy are runtime-owned constants.
-type PlannerHostContainer struct{ base *RuntimeHomeDockerContainer }
+type PlannerHostContainer struct {
+	base               *RuntimeHomeDockerContainer
+	evidenceVerified   bool
+	failureClass       string
+	lastConfirmedStage string
+	httpDiagnostic     bool
+	responseDiagnostic bool
+}
+
+// These observations contain only host-owned enum values, never payload text.
+func (c *PlannerHostContainer) SanitizedFailureClass() string {
+	if c == nil || c.failureClass == "" {
+		return "unknown"
+	}
+	return c.failureClass
+}
+func (c *PlannerHostContainer) LastConfirmedStage() string {
+	if c == nil || c.lastConfirmedStage == "" {
+		return "none"
+	}
+	return c.lastConfirmedStage
+}
+func (c *PlannerHostContainer) observeHostResponse(data []byte) {
+	c.failureClass = "protocol_invalid"
+	if len(data) > 128*1024 || !utf8.Valid(data) || plannerUniqueJSON(data) != nil {
+		return
+	}
+	var fields map[string]json.RawMessage
+	if json.Unmarshal(data, &fields) != nil || len(fields) != 2 || !bytes.Equal(bytes.TrimSpace(fields["version"]), []byte("1")) {
+		return
+	}
+	var class string
+	if json.Unmarshal(fields["error"], &class) != nil {
+		return
+	}
+	switch class {
+	case "auth_failure", "tool_observed", "output_missing", "output_invalid", "session_start_failure", "inference_failure", "provider_failure", "timeout", "cleanup_failure", "runtime_failure", "invalid_request", "input_limit", "output_limit", "cancelled", "connect_failure", "proxy_failure", "provider_http_failure", "provider_stream_failure", "provider_rejected", "provider_unavailable", "provider_rate_limited", "provider_attempts_exhausted", "provider_response_failed", "provider_schema_rejected", "provider_model_rejected", "provider_incomplete", "provider_protocol_failure", "diagnostic_completed":
+		c.failureClass = class
+		// Receipt of a closed, versioned host error proves host startup only.
+		c.lastConfirmedStage = "HOST_START"
+		switch class {
+		case "session_start_failure":
+			c.lastConfirmedStage = "AUTH"
+		case "inference_failure":
+			c.lastConfirmedStage = "SESSION_START"
+		case "provider_failure", "connect_failure", "proxy_failure", "provider_http_failure", "provider_stream_failure", "provider_rejected", "provider_unavailable", "provider_rate_limited", "provider_attempts_exhausted":
+			// These enums originate only in the event loop after start_thread and
+			// local turn submission succeeded. They do not prove provider receipt.
+			c.lastConfirmedStage = "SESSION_START"
+		case "output_missing", "output_invalid", "output_limit":
+			c.lastConfirmedStage = "PROVIDER_RESPONSE"
+		case "provider_response_failed", "provider_schema_rejected", "provider_model_rejected", "provider_incomplete", "provider_protocol_failure", "diagnostic_completed":
+			c.lastConfirmedStage = "PROVIDER_RESPONSE"
+		}
+	}
+}
+
+// SanitizedEvidenceVerified is true only after the closed host attestation,
+// successful process exit and exact EOF have all been checked.
+func (c *PlannerHostContainer) SanitizedEvidenceVerified() bool {
+	return c != nil && c.evidenceVerified
+}
 
 func NewPlannerHostContainer() (*PlannerHostContainer, error) {
 	base, err := NewRuntimeHomeDockerContainer("auth.openai.com,chatgpt.com")
@@ -25,6 +87,25 @@ func NewPlannerHostContainer() (*PlannerHostContainer, error) {
 		return nil, ErrPlannerRuntimeFailure
 	}
 	return &PlannerHostContainer{base: base}, nil
+}
+
+// NewPlannerHostHTTPDiagnosticContainer isolates transport selection only.
+// Production construction retains the dependency's configured transport.
+func NewPlannerHostHTTPDiagnosticContainer() (*PlannerHostContainer, error) {
+	c, err := NewPlannerHostContainer()
+	if err != nil {
+		return nil, err
+	}
+	c.httpDiagnostic = true
+	return c, nil
+}
+
+func NewPlannerHostResponseDiagnosticContainer() (*PlannerHostContainer, error) {
+	c, err := NewPlannerHostContainer()
+	if err == nil {
+		c.responseDiagnostic = true
+	}
+	return c, err
 }
 func (c *PlannerHostContainer) Prepare(ctx context.Context, archive io.Reader) error {
 	if c == nil || c.base == nil {
@@ -54,7 +135,12 @@ func plannerHostProcessOptions() client.ExecCreateOptions {
 	return opts
 }
 
-type plannerHostDocker struct{ *ownedCodexEgress }
+type plannerHostDocker struct {
+	*ownedCodexEgress
+	probe              bool
+	httpDiagnostic     bool
+	responseDiagnostic bool
+}
 
 // Reuse the shared bounded Write/Read/Close and lease-owned termination, with
 // a single-shot stdout pump: a clean frame boundary is successful EOF.
@@ -125,7 +211,17 @@ func (d plannerHostDocker) startCodexProcess(ctx context.Context, id string) (co
 	if !d.proxyHealthy(ctx) {
 		return codexProcessAttachment{}, ErrPlannerRuntimeFailure
 	}
-	created, err := d.client.ExecCreate(ctx, id, plannerHostProcessOptions())
+	opts := plannerHostProcessOptions()
+	if d.probe {
+		opts.Cmd = append(opts.Cmd, "--probe-handshake")
+	}
+	if d.httpDiagnostic {
+		opts.Cmd = append(opts.Cmd, "--http-sse-diagnostic")
+	}
+	if d.responseDiagnostic {
+		opts.Cmd = append(opts.Cmd, "--response-diagnostic")
+	}
+	created, err := d.client.ExecCreate(ctx, id, opts)
 	if err != nil {
 		return codexProcessAttachment{}, ErrPlannerRuntimeFailure
 	}
@@ -158,7 +254,7 @@ func decodePlannerHostResponse(data []byte, maxOutput int) (PlannerRuntimeResult
 		return PlannerRuntimeResult{}, ErrPlannerRuntimeFailure
 	}
 	var fields map[string]json.RawMessage
-	if json.Unmarshal(data, &fields) != nil || len(fields) != 2 || fields["version"] == nil || fields["structuredOutput"] == nil {
+	if json.Unmarshal(data, &fields) != nil || len(fields) != 3 || fields["version"] == nil || fields["structuredOutput"] == nil || !validPlannerHostEvidence(fields["evidence"]) {
 		return PlannerRuntimeResult{}, ErrPlannerRuntimeFailure
 	}
 	var response struct {
@@ -169,6 +265,20 @@ func decodePlannerHostResponse(data []byte, maxOutput int) (PlannerRuntimeResult
 		return PlannerRuntimeResult{}, ErrPlannerRuntimeFailure
 	}
 	return PlannerRuntimeResult{StructuredOutput: response.StructuredOutput}, nil
+}
+
+func validPlannerHostEvidence(data []byte) bool {
+	const expected = `{"auth":"runtime_owned","inference_attempt":1,"request_max_retries":0,"stream_max_retries":0,"tools_policy":"empty","tools_observed":0,"cleanup":"pass"}`
+	var got, want map[string]json.RawMessage
+	if json.Unmarshal(data, &got) != nil || json.Unmarshal([]byte(expected), &want) != nil || len(got) != len(want) {
+		return false
+	}
+	for key, value := range want {
+		if !bytes.Equal(bytes.TrimSpace(got[key]), value) {
+			return false
+		}
+	}
+	return true
 }
 
 func plannerUniqueJSON(data []byte) error {
@@ -238,38 +348,124 @@ func (c *PlannerHostContainer) Infer(ctx context.Context, r PlannerRuntimeReques
 	}
 	ctx, cancel := context.WithTimeout(ctx, r.Limits.Timeout)
 	defer cancel()
-	c.base.process, err = startPlannerHostProcessRuntime(ctx, plannerHostDocker{c.base.egress}, c.base.id)
+	c.base.process, err = startPlannerHostProcessRuntime(ctx, plannerHostDocker{ownedCodexEgress: c.base.egress, httpDiagnostic: c.httpDiagnostic, responseDiagnostic: c.responseDiagnostic}, c.base.id)
 	if err != nil {
+		c.failureClass = "host_start_failure"
 		return PlannerRuntimeResult{}, ErrPlannerRuntimeFailure
 	}
 	p := c.base.process
+	c.lastConfirmedStage = "HOST_START"
 	if p.Write(data) != nil {
+		c.failureClass = "host_transport_failure"
 		return PlannerRuntimeResult{}, plannerHostError(ctx)
 	}
 	response, err := p.Read()
 	if err != nil {
+		c.failureClass = "host_transport_failure"
 		return PlannerRuntimeResult{}, plannerHostError(ctx)
 	}
 	defer clear(response)
 	result, err := decodePlannerHostResponse(response, r.Limits.MaxOutputBytes)
 	if err != nil {
+		c.observeHostResponse(response)
 		return PlannerRuntimeResult{}, err
 	}
+	c.lastConfirmedStage = "RUNTIME_DECODE"
 	// One response only; await stdout EOF and successful process exit before capture.
 	p.readMu.Lock()
 	endErr := plannerHostEOF(p.reader)
 	p.readMu.Unlock()
 	if endErr != nil || p.Close() != nil {
+		c.failureClass = "protocol_invalid"
 		return PlannerRuntimeResult{}, plannerHostError(ctx)
 	}
 	inspect, err := c.base.driver.client.ExecInspect(ctx, p.attachment.execID, client.ExecInspectOptions{})
 	if err != nil || inspect.Running || inspect.ExitCode != 0 {
+		c.failureClass = "host_exit_failure"
 		return PlannerRuntimeResult{}, plannerHostError(ctx)
 	}
 	if err := ctx.Err(); err != nil {
 		return PlannerRuntimeResult{}, err
 	}
+	c.evidenceVerified = true
 	return result, nil
+}
+
+type PlannerProbeEvidence struct {
+	AuthAvailable bool   `json:"auth_available"`
+	WSHandshake   string `json:"ws_handshake"`
+	HTTPClass     string `json:"http_class"`
+	WSCloseClass  string `json:"ws_close_class"`
+	InferenceSent bool   `json:"inference_sent"`
+}
+
+func decodePlannerProbe(data []byte) (PlannerProbeEvidence, error) {
+	var empty PlannerProbeEvidence
+	if len(data) > 4096 || !utf8.Valid(data) || plannerUniqueJSON(data) != nil {
+		return empty, ErrPlannerRuntimeFailure
+	}
+	var fields map[string]json.RawMessage
+	if json.Unmarshal(data, &fields) != nil || len(fields) != 5 {
+		return empty, ErrPlannerRuntimeFailure
+	}
+	for _, key := range []string{"auth_available", "ws_handshake", "http_class", "ws_close_class", "inference_sent"} {
+		if fields[key] == nil || bytes.Equal(bytes.TrimSpace(fields[key]), []byte("null")) {
+			return empty, ErrPlannerRuntimeFailure
+		}
+	}
+	var result PlannerProbeEvidence
+	if json.Unmarshal(data, &result) != nil || result.InferenceSent {
+		return empty, ErrPlannerRuntimeFailure
+	}
+	allowed := func(value string, choices ...string) bool {
+		for _, choice := range choices {
+			if value == choice {
+				return true
+			}
+		}
+		return false
+	}
+	if !allowed(result.WSHandshake, "PASS", "FAIL", "UNKNOWN") || !allowed(result.HTTPClass, "101", "2xx", "401", "403", "407", "429", "5xx", "OTHER", "UNKNOWN") || !allowed(result.WSCloseClass, "NONE", "NORMAL", "POLICY", "OTHER", "UNKNOWN") || (result.WSHandshake == "PASS" && (!result.AuthAvailable || result.HTTPClass != "101")) {
+		return empty, ErrPlannerRuntimeFailure
+	}
+	return result, nil
+}
+
+// ProbeHandshake uses the existing lease-owned container, proxy and auth home.
+// The fixed diagnostic process opens one handshake without starting a thread.
+func (c *PlannerHostContainer) ProbeHandshake(ctx context.Context) (PlannerProbeEvidence, error) {
+	var empty PlannerProbeEvidence
+	if c == nil || c.base == nil || c.base.destroyed || c.base.id == "" || c.base.process != nil {
+		return empty, ErrPlannerRuntimeFailure
+	}
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	var err error
+	c.base.process, err = startPlannerHostProcessRuntime(ctx, plannerHostDocker{ownedCodexEgress: c.base.egress, probe: true}, c.base.id)
+	if err != nil {
+		return empty, ErrPlannerRuntimeFailure
+	}
+	p := c.base.process
+	data, err := p.Read()
+	if err != nil {
+		return empty, ErrPlannerRuntimeFailure
+	}
+	defer clear(data)
+	report, err := decodePlannerProbe(data)
+	if err != nil {
+		return empty, err
+	}
+	p.readMu.Lock()
+	endErr := plannerHostEOF(p.reader)
+	p.readMu.Unlock()
+	if endErr != nil || p.Close() != nil {
+		return empty, ErrPlannerRuntimeFailure
+	}
+	inspect, err := c.base.driver.client.ExecInspect(ctx, p.attachment.execID, client.ExecInspectOptions{})
+	if err != nil || inspect.Running || inspect.ExitCode != 0 || ctx.Err() != nil {
+		return empty, ErrPlannerRuntimeFailure
+	}
+	return report, nil
 }
 
 // The shared transport treats EOF as an RPC failure. This single-shot protocol

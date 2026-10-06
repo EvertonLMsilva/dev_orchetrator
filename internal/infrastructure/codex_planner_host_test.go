@@ -72,7 +72,7 @@ func TestPlannerHostStrictResponse(t *testing.T) {
 			t.Fatalf("ambiguous response accepted: %s", bad)
 		}
 	}
-	valid := []byte(`{"version":1,"structuredOutput":{"ok":true}}`)
+	valid := []byte(`{"version":1,"structuredOutput":{"ok":true},"evidence":{"auth":"runtime_owned","inference_attempt":1,"request_max_retries":0,"stream_max_retries":0,"tools_policy":"empty","tools_observed":0,"cleanup":"pass"}}`)
 	result, err := decodePlannerHostResponse(valid, 1024)
 	if err != nil || string(result.StructuredOutput) != `{"ok":true}` {
 		t.Fatalf("structured output: %v", err)
@@ -84,6 +84,23 @@ func TestPlannerHostStrictResponse(t *testing.T) {
 	}
 	if _, err := decodePlannerHostResponse(valid, 4); err == nil {
 		t.Fatal("oversized output accepted")
+	}
+}
+
+func TestPlannerHostEvidenceFailClosed(t *testing.T) {
+	valid := `{"version":1,"structuredOutput":{"ok":true},"evidence":{"auth":"runtime_owned","inference_attempt":1,"request_max_retries":0,"stream_max_retries":0,"tools_policy":"empty","tools_observed":0,"cleanup":"pass"}}`
+	for _, bad := range []string{
+		strings.Replace(valid, `"tools_observed":0`, `"tools_observed":1`, 1),
+		strings.Replace(valid, `"request_max_retries":0`, `"request_max_retries":1`, 1),
+		strings.Replace(valid, `"stream_max_retries":0`, `"stream_max_retries":1`, 1),
+		strings.Replace(valid, `"inference_attempt":1`, `"inference_attempt":2`, 1),
+		strings.Replace(valid, `"empty"`, `"SECRET_SENTINEL"`, 1),
+		strings.Replace(valid, `"cleanup":"pass"`, `"cleanup":"unknown"`, 1),
+	} {
+		result, err := decodePlannerHostResponse([]byte(bad), 1024)
+		if err == nil || len(result.StructuredOutput) != 0 || strings.Contains(err.Error(), "SECRET_SENTINEL") {
+			t.Fatal("unsafe host evidence accepted or leaked")
+		}
 	}
 }
 
@@ -141,5 +158,71 @@ func TestPlannerHostCanceledRequest(t *testing.T) {
 	c := &PlannerHostContainer{}
 	if _, err := c.Infer(ctx, hostTestRequest()); err != context.Canceled {
 		t.Fatalf("cancel: %v", err)
+	}
+}
+
+func TestPlannerHostSanitizedFailureClass(t *testing.T) {
+	for _, class := range []string{"auth_failure", "tool_observed", "output_missing", "output_invalid", "session_start_failure", "inference_failure", "provider_failure", "timeout", "cleanup_failure", "connect_failure", "proxy_failure", "provider_http_failure", "provider_stream_failure", "provider_rejected", "provider_unavailable", "provider_rate_limited", "provider_attempts_exhausted"} {
+		frame := []byte(`{"version":1,"error":"` + class + `"}`)
+		c := &PlannerHostContainer{}
+		c.observeHostResponse(frame)
+		if c.SanitizedFailureClass() != class {
+			t.Fatal("host failure classification lost")
+		}
+		if strings.HasPrefix(class, "provider_") || class == "connect_failure" || class == "proxy_failure" {
+			if c.LastConfirmedStage() != "SESSION_START" {
+				t.Fatal("confirmed session boundary lost")
+			}
+		}
+		if result, err := decodePlannerHostResponse(frame, 1024); err == nil || len(result.StructuredOutput) != 0 {
+			t.Fatal("failure became a valid result")
+		}
+	}
+	for _, bad := range []string{
+		`{"version":1,"error":"SECRET_SENTINEL"}`,
+		`{"version":1,"error":"auth_failure","reason":"SECRET_SENTINEL"}`,
+		`{"version":1,"error":"auth_failure","error":"tool_observed"}`,
+		`{"version":2,"error":"auth_failure"}`, `{`,
+	} {
+		c := &PlannerHostContainer{}
+		c.observeHostResponse([]byte(bad))
+		if c.SanitizedFailureClass() != "protocol_invalid" || strings.Contains(c.SanitizedFailureClass(), "SECRET") {
+			t.Fatal("unsafe diagnostic frame")
+		}
+	}
+}
+
+func TestPlannerProbeClosedEvidence(t *testing.T) {
+	valid := `{"auth_available":true,"ws_handshake":"PASS","http_class":"101","ws_close_class":"NONE","inference_sent":false}`
+	if report, err := decodePlannerProbe([]byte(valid)); err != nil || report.InferenceSent {
+		t.Fatal("valid probe rejected")
+	}
+	for _, bad := range []string{
+		strings.Replace(valid, `"inference_sent":false`, `"inference_sent":true`, 1),
+		strings.Replace(valid, `"101"`, `"SECRET_SENTINEL"`, 1),
+		strings.Replace(valid, `"auth_available":true`, `"auth_available":null`, 1),
+		strings.Replace(valid, `"auth_available":true`, `"auth_available":true,"auth_available":false`, 1),
+		strings.Replace(valid, `"101"`, `"403"`, 1),
+		strings.Replace(valid, `"ws_close_class":"NONE"`, `"reason":"SECRET_SENTINEL"`, 1),
+	} {
+		_, err := decodePlannerProbe([]byte(bad))
+		if err == nil || strings.Contains(err.Error(), "SECRET") {
+			t.Fatal("unsafe diagnostic accepted")
+		}
+	}
+}
+
+func TestPlannerResponseDiagnosticCannotPublishDecision(t *testing.T) {
+	for _, class := range []string{"provider_response_failed", "provider_schema_rejected", "provider_model_rejected", "provider_incomplete", "provider_protocol_failure", "diagnostic_completed"} {
+		frame := []byte(`{"version":1,"error":"` + class + `"}`)
+		c := &PlannerHostContainer{}
+		c.observeHostResponse(frame)
+		if c.SanitizedFailureClass() != class || c.LastConfirmedStage() != "PROVIDER_RESPONSE" {
+			t.Fatal("structured diagnostic lost")
+		}
+		result, err := decodePlannerHostResponse(frame, 1024)
+		if err == nil || len(result.StructuredOutput) != 0 {
+			t.Fatal("diagnostic published a decision")
+		}
 	}
 }
