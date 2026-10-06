@@ -348,11 +348,12 @@ func TestPersistedAccountReadLifecycle(t *testing.T) {
 			}
 			f := &persistedReadFixture{responses: [][]byte{[]byte(`{"id":1,"result":{"userAgent":"fixture","codexHome":"/run/codex-auth","platformFamily":"unix","platformOs":"linux"}}`), []byte(tc.response)}}
 			var lines []string
-			if !runPersistedAccountRead(context.Background(), s, f, func(line string) { lines = append(lines, line) }) {
-				t.Fatal("lifecycle failed")
+			ok := runPersistedAccountRead(context.Background(), s, f, func(line string) { lines = append(lines, line) })
+			if ok != (tc.name != "malformed") {
+				t.Fatal("RPC failure hidden by successful persistence")
 			}
 			output := strings.Join(lines, "\n")
-			for _, expected := range []string{"INITIALIZE=PASS", "INITIALIZED=PASS", "AUTH_CAPTURE=PASS", "AUTH_PERSIST=PASS", "B_P4_001=" + tc.verdict} {
+			for _, expected := range []string{"INITIALIZE=PASS", "INITIALIZED=PASS", "ACCOUNT_READ_REQUEST=PASS", "classification=", "AUTH_CAPTURE=PASS", "AUTH_PERSIST=PASS", "B_P4_001=" + tc.verdict} {
 				if !strings.Contains(output, expected) {
 					t.Fatal("missing safe diagnostic")
 				}
@@ -449,12 +450,9 @@ func runPersistedAccountRead(ctx context.Context, store *CodexRuntimeHome, c per
 	for _, line := range d.Lines() {
 		key, value, _ := strings.Cut(line, "=")
 		switch key {
-		case "ACCOUNT_READ_RPC", "RESPONSE_CORRELATED", "RESULT_PRESENT", "ACCOUNT_PRESENT", "ACCOUNT_TYPE", "RPC_ERROR_PRESENT", "RPC_CODE", "WORKSPACE_ROUTING":
+		case "classification", "ACCOUNT_READ_REQUEST", "ACCOUNT_READ_RPC", "RESPONSE_CORRELATED", "RESULT_PRESENT", "ACCOUNT_PRESENT", "ACCOUNT_TYPE", "RPC_ERROR_PRESENT", "RPC_CODE", "WORKSPACE_ROUTING":
 			facts[key] = value
-			// No evidence of an RPC envelope: do not assert absence of an error.
-			if key != "RPC_ERROR_PRESENT" || value != "unknown" {
-				report(line)
-			}
+			report(line)
 		}
 	}
 	verdict := "INCONCLUSIVE"
@@ -465,7 +463,7 @@ func runPersistedAccountRead(ctx context.Context, store *CodexRuntimeHome, c per
 		verdict = "REPRODUCED_WITH_FRESH_RUNTIME_SESSION"
 	}
 	report("B_P4_001=" + verdict)
-	return true
+	return facts["ACCOUNT_READ_REQUEST"] == "PASS" && facts["ACCOUNT_READ_RPC"] == "PASS"
 }
 
 func TestPersistedAccountReadLiveOptIn(t *testing.T) {

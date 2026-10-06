@@ -3,6 +3,7 @@ package infrastructure
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -281,6 +282,7 @@ func ReadRuntimeHomeAccount(ctx context.Context, session CodexExecutorSession) (
 // Facts are inferred only from branches reached by the existing strict reader.
 // No account payload, personal data, upstream text or projected shape is retained.
 type RuntimeHomeAccountDiagnostics struct {
+	request                                                                                    string
 	classification, rpc, response, correlated, result, account, accountType, rpcError, routing string
 	code                                                                                       *int64
 }
@@ -294,16 +296,17 @@ func (d RuntimeHomeAccountDiagnostics) Lines() []string {
 		}
 		return fallback
 	}
-	d.classification = allowed(d.classification, "UNKNOWN", "PASS", "ACCOUNT_READ_TRANSPORT_FAILURE", "ACCOUNT_READ_RESULT_UNEXPECTED", "ACCOUNT_READ_RESULT_ACCOUNT_NONE", "ACCOUNT_READ_RPC_ERROR", "WORKSPACE_ROUTING_FAILURE")
-	d.rpc = allowed(d.rpc, "UNKNOWN", "PASS", "FAIL")
+	d.classification = allowed(d.classification, "ACCOUNT_READ_LOCAL_FAILURE", "PASS", "ACCOUNT_READ_LOCAL_FAILURE", "ACCOUNT_READ_TRANSPORT_FAILURE", "ACCOUNT_READ_EOF", "ACCOUNT_READ_TIMEOUT", "ACCOUNT_READ_CANCELLED", "ACCOUNT_READ_ENVELOPE_INVALID", "ACCOUNT_READ_ID_MISMATCH", "ACCOUNT_READ_SERVER_REQUEST", "ACCOUNT_READ_RESULT_UNEXPECTED", "ACCOUNT_READ_RESULT_ACCOUNT_NONE", "ACCOUNT_READ_RPC_ERROR", "WORKSPACE_ROUTING_FAILURE")
+	d.request = allowed(d.request, "FAIL", "PASS", "FAIL")
+	d.rpc = allowed(d.rpc, "FAIL", "PASS", "FAIL")
 	d.response = allowed(d.response, "UNKNOWN", "PASS", "FAIL")
 	d.routing = allowed(d.routing, "UNKNOWN", "PASS", "FAIL")
-	d.correlated = allowed(d.correlated, "unknown", "yes", "no")
-	d.result = allowed(d.result, "unknown", "yes", "no")
-	d.account = allowed(d.account, "unknown", "yes", "no")
-	d.rpcError = allowed(d.rpcError, "unknown", "yes", "no")
+	d.correlated = allowed(d.correlated, "no", "yes", "no")
+	d.result = allowed(d.result, "no", "yes", "no")
+	d.account = allowed(d.account, "no", "yes", "no")
+	d.rpcError = allowed(d.rpcError, "no", "yes", "no")
 	d.accountType = allowed(d.accountType, "UNKNOWN", "chatgpt")
-	return []string{"classification=" + d.classification, "ACCOUNT_READ_RPC=" + d.rpc, "ACCOUNT_READ_RESPONSE=" + d.response, "RESPONSE_CORRELATED=" + d.correlated, "RESULT_PRESENT=" + d.result, "ACCOUNT_PRESENT=" + d.account, "ACCOUNT_TYPE=" + d.accountType, "RPC_ERROR_PRESENT=" + d.rpcError, "RPC_CODE=" + func() string {
+	return []string{"classification=" + d.classification, "ACCOUNT_READ_REQUEST=" + d.request, "ACCOUNT_READ_RPC=" + d.rpc, "ACCOUNT_READ_RESPONSE=" + d.response, "RESPONSE_CORRELATED=" + d.correlated, "RESULT_PRESENT=" + d.result, "ACCOUNT_PRESENT=" + d.account, "ACCOUNT_TYPE=" + d.accountType, "RPC_ERROR_PRESENT=" + d.rpcError, "RPC_CODE=" + func() string {
 		if d.code != nil {
 			return fmt.Sprint(*d.code)
 		}
@@ -323,8 +326,9 @@ func (d RuntimeHomeAccountDiagnostics) LegacyResult() (string, *int64) {
 	return "account_unavailable", nil
 }
 func ReadRuntimeHomeAccountDiagnostics(ctx context.Context, session CodexExecutorSession) RuntimeHomeAccountDiagnostics {
-	d := RuntimeHomeAccountDiagnostics{classification: "UNKNOWN", rpc: "UNKNOWN", response: "UNKNOWN", correlated: "unknown", result: "unknown", account: "unknown", accountType: "UNKNOWN", rpcError: "unknown", routing: "UNKNOWN"}
-	err := requireCodexChatGPTAccount(codexContextTransport{ctx: ctx, session: session})
+	d := RuntimeHomeAccountDiagnostics{classification: "ACCOUNT_READ_LOCAL_FAILURE", request: "FAIL", rpc: "FAIL", response: "FAIL", correlated: "no", result: "no", account: "no", accountType: "UNKNOWN", rpcError: "no", routing: "UNKNOWN"}
+	observer := runtimeAccountObserver{ctx: ctx, session: session, diagnostic: &d}
+	err := requireCodexChatGPTAccount(&observer)
 	if err == nil {
 		d.classification = "PASS"
 		d.rpc = "PASS"
@@ -342,10 +346,15 @@ func ReadRuntimeHomeAccountDiagnostics(ctx context.Context, session CodexExecuto
 	}
 	switch diagnostic.Kind {
 	case "transport":
-		d.classification = "ACCOUNT_READ_TRANSPORT_FAILURE"
+		if d.classification == "ACCOUNT_READ_LOCAL_FAILURE" {
+			d.classification = "ACCOUNT_READ_TRANSPORT_FAILURE"
+		}
 		d.rpc = "FAIL"
 	case "protocol_decode":
-		d.classification = "ACCOUNT_READ_RESULT_UNEXPECTED"
+		if d.classification == "ACCOUNT_READ_LOCAL_FAILURE" {
+			d.classification = "ACCOUNT_READ_RESULT_UNEXPECTED"
+		}
+		d.rpc = "FAIL"
 		d.response = "FAIL"
 	case "rpc_error", "workspace_routing":
 		d.classification = "ACCOUNT_READ_RPC_ERROR"
@@ -376,6 +385,101 @@ func ReadRuntimeHomeAccountDiagnostics(ctx context.Context, session CodexExecuto
 		}
 	}
 	return d
+}
+
+// Administrative observation only: the existing reader remains the authority
+// for correlation and account validation. No buffers or remote error text survive.
+// A "no" fact means the fact was not established by a valid correlated envelope.
+type runtimeAccountObserver struct {
+	ctx        context.Context
+	session    CodexExecutorSession
+	diagnostic *RuntimeHomeAccountDiagnostics
+}
+
+func (o *runtimeAccountObserver) Write(b []byte) error {
+	if o.ctx == nil || o.session == nil {
+		return errors.New("account transport unavailable")
+	}
+	if err := o.ctx.Err(); err != nil {
+		o.transportFailure(err)
+		return err
+	}
+	stop := context.AfterFunc(o.ctx, func() { o.session.Close() })
+	defer stop()
+	err := o.session.Write(b)
+	if err != nil {
+		o.transportFailure(err)
+		return err
+	}
+	o.diagnostic.request = "PASS"
+	return nil
+}
+
+func (o *runtimeAccountObserver) transportFailure(err error) {
+	o.diagnostic.classification = "ACCOUNT_READ_TRANSPORT_FAILURE"
+	switch {
+	case errors.Is(o.ctx.Err(), context.DeadlineExceeded), errors.Is(err, context.DeadlineExceeded):
+		o.diagnostic.classification = "ACCOUNT_READ_TIMEOUT"
+	case errors.Is(o.ctx.Err(), context.Canceled), errors.Is(err, context.Canceled):
+		o.diagnostic.classification = "ACCOUNT_READ_CANCELLED"
+	case errors.Is(err, io.EOF):
+		o.diagnostic.classification = "ACCOUNT_READ_EOF"
+	}
+}
+
+func (o *runtimeAccountObserver) Read() ([]byte, error) {
+	if err := o.ctx.Err(); err != nil {
+		o.transportFailure(err)
+		return nil, err
+	}
+	stop := context.AfterFunc(o.ctx, func() { o.session.Close() })
+	defer stop()
+	b, err := o.session.Read()
+	if err != nil {
+		o.transportFailure(err)
+		return b, err
+	}
+	id := CodexIntegerID(99)
+	envelope, notification, invalid := decodeCodexCorrelatedEnvelope(b, &id)
+	if invalid != nil {
+		o.diagnostic.classification = "ACCOUNT_READ_ENVELOPE_INVALID"
+		var structural codexEnvelope
+		if decodeCodexStrictObject(b, &structural) == nil {
+			if len(structural.ID) > 0 && len(structural.Method) > 0 {
+				o.diagnostic.classification = "ACCOUNT_READ_SERVER_REQUEST"
+			} else {
+				var received CodexRequestID
+				if len(structural.Method) == 0 && json.Unmarshal(structural.ID, &received) == nil && received != id {
+					o.diagnostic.classification = "ACCOUNT_READ_ID_MISMATCH"
+				}
+			}
+		}
+		return b, nil
+	}
+	if notification {
+		return b, nil
+	}
+	d := o.diagnostic
+	d.correlated = "yes"
+	if len(envelope.Error) > 0 {
+		d.rpcError = "yes"
+	}
+	if len(envelope.Result) > 0 {
+		d.result = "yes"
+		var result struct {
+			Account json.RawMessage `json:"account"`
+		}
+		if json.Unmarshal(envelope.Result, &result) == nil && codexObject(result.Account) {
+			d.account = "yes"
+			var account struct {
+				Type string `json:"type"`
+			}
+			if json.Unmarshal(result.Account, &account) == nil && account.Type == "chatgpt" {
+				d.accountType = "chatgpt"
+			}
+		}
+	}
+	return b, nil
 }
 
 // DockerEnvironmentConfig describes the only authorized bind mount. It has no

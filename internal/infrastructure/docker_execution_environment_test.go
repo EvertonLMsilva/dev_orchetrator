@@ -341,7 +341,7 @@ func (*diagnosticAccountSession) Close() error { return nil }
 
 func TestRuntimeHomeAccountStructuralDiagnostics(t *testing.T) {
 	unknown := RuntimeHomeAccountDiagnostics{classification: "SECRET", accountType: "SECRET", rpc: "SECRET"}
-	if lines := strings.Join(unknown.Lines(), "\n"); strings.Contains(lines, "SECRET") || !strings.Contains(lines, "classification=UNKNOWN") {
+	if lines := strings.Join(unknown.Lines(), "\n"); strings.Contains(lines, "SECRET") || !strings.Contains(lines, "classification=ACCOUNT_READ_LOCAL_FAILURE") || !strings.Contains(lines, "ACCOUNT_READ_RPC=FAIL") {
 		t.Fatal("unknown diagnostic did not fail closed")
 	}
 	for _, tc := range []struct{ wire, classification, signal string }{
@@ -349,7 +349,7 @@ func TestRuntimeHomeAccountStructuralDiagnostics(t *testing.T) {
 		{`{"id":99,"error":{"code":-32603,"message":"SECRET","data":{"token":"SECRET"}}}`, "ACCOUNT_READ_RPC_ERROR", "RPC_CODE=-32603"},
 		{`{"id":99,"error":{"code":-32603,"message":"workspace routing discovery failed"}}`, "WORKSPACE_ROUTING_FAILURE", "WORKSPACE_ROUTING=FAIL"},
 		{`{"id":99,"result":{"account":null,"requiresOpenaiAuth":true}}`, "ACCOUNT_READ_RESULT_ACCOUNT_NONE", "ACCOUNT_PRESENT=no"},
-		{`{"id":98,"result":{"account":null,"requiresOpenaiAuth":true}}`, "ACCOUNT_READ_RESULT_UNEXPECTED", "RESPONSE_CORRELATED=unknown"},
+		{`{"id":98,"result":{"account":null,"requiresOpenaiAuth":true}}`, "ACCOUNT_READ_ID_MISMATCH", "RESPONSE_CORRELATED=no"},
 		{`{"id":99,"result":{"account":{"type":"SECRET","email":"SECRET","planType":"SECRET"},"requiresOpenaiAuth":true}}`, "ACCOUNT_READ_RESULT_UNEXPECTED", "ACCOUNT_PRESENT=yes"},
 	} {
 		d := ReadRuntimeHomeAccountDiagnostics(context.Background(), &diagnosticAccountSession{tc.wire})
@@ -389,6 +389,92 @@ func TestRuntimeHomeAccountReadDoesNotRefreshOrInfer(t *testing.T) {
 	if kind != "pass" {
 		t.Fatal("valid runtime account rejected")
 	}
+}
+
+type deterministicAccountSession struct {
+	wires             []string
+	readErr, writeErr error
+	written           bool
+	closed            chan struct{}
+}
+
+func (s *deterministicAccountSession) Write([]byte) error {
+	s.written = s.writeErr == nil
+	return s.writeErr
+}
+func (s *deterministicAccountSession) Read() ([]byte, error) {
+	if len(s.wires) > 0 {
+		wire := s.wires[0]
+		s.wires = s.wires[1:]
+		return []byte(wire), nil
+	}
+	if s.closed != nil {
+		<-s.closed
+		return nil, io.EOF
+	}
+	return nil, s.readErr
+}
+func (s *deterministicAccountSession) Close() error {
+	if s.closed != nil {
+		close(s.closed)
+	}
+	return nil
+}
+
+func TestAccountReadDeterministicDiagnostics(t *testing.T) {
+	success := `{"id":99,"result":{"account":{"type":"chatgpt","email":"SECRET_EMAIL","planType":"SECRET_PLAN"},"requiresOpenaiAuth":true}}`
+	notification := `{"method":"account/updated","params":{"SECRET":"SECRET_TOKEN"}}`
+	for _, tc := range []struct {
+		name                            string
+		wires                           []string
+		readErr                         error
+		rpc, classification, correlated string
+	}{
+		{"correlated_success", []string{success}, nil, "PASS", "PASS", "yes"},
+		{"rpc_error", []string{`{"id":99,"error":{"code":-32603,"message":"SECRET_ERROR","data":"SECRET_DATA"}}`}, nil, "PASS", "ACCOUNT_READ_RPC_ERROR", "yes"},
+		{"eof", nil, io.EOF, "FAIL", "ACCOUNT_READ_EOF", "no"},
+		{"timeout", nil, context.DeadlineExceeded, "FAIL", "ACCOUNT_READ_TIMEOUT", "no"},
+		{"malformed", []string{`{"SECRET_BODY"`}, nil, "FAIL", "ACCOUNT_READ_ENVELOPE_INVALID", "no"},
+		{"notification", []string{notification, success}, nil, "PASS", "PASS", "yes"},
+		{"multiple_notifications", []string{notification, notification, success}, nil, "PASS", "PASS", "yes"},
+		{"notification_then_eof", []string{notification}, io.EOF, "FAIL", "ACCOUNT_READ_EOF", "no"},
+		{"mismatched_id", []string{`{"id":98,"result":{"account":null,"requiresOpenaiAuth":true}}`}, nil, "FAIL", "ACCOUNT_READ_ID_MISMATCH", "no"},
+		{"server_request", []string{`{"id":7,"method":"SECRET_METHOD","params":{"token":"SECRET"}}`}, nil, "FAIL", "ACCOUNT_READ_SERVER_REQUEST", "no"},
+		{"account_absent", []string{`{"id":99,"result":{"account":null,"requiresOpenaiAuth":true}}`}, nil, "PASS", "ACCOUNT_READ_RESULT_ACCOUNT_NONE", "yes"},
+		{"unexpected_account_type", []string{`{"id":99,"result":{"account":{"type":"SECRET","email":"SECRET","planType":"SECRET"},"requiresOpenaiAuth":true}}`}, nil, "PASS", "ACCOUNT_READ_RESULT_UNEXPECTED", "yes"},
+		{"workspace_routing", []string{`{"id":99,"error":{"code":-32603,"message":"workspace routing discovery failed"}}`}, nil, "PASS", "WORKSPACE_ROUTING_FAILURE", "yes"},
+		{"result_decode", []string{`{"id":99,"result":{"SECRET_FIELD":"SECRET_VALUE"}}`}, nil, "FAIL", "ACCOUNT_READ_RESULT_UNEXPECTED", "yes"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := &deterministicAccountSession{wires: tc.wires, readErr: tc.readErr}
+			d := ReadRuntimeHomeAccountDiagnostics(context.Background(), s)
+			lines := strings.Join(d.Lines(), "\n")
+			for _, expected := range []string{"ACCOUNT_READ_REQUEST=PASS", "ACCOUNT_READ_RPC=" + tc.rpc, "classification=" + tc.classification, "RESPONSE_CORRELATED=" + tc.correlated} {
+				if !strings.Contains(lines, expected) {
+					t.Fatal("incorrect deterministic diagnostic")
+				}
+			}
+			if !s.written || strings.Contains(lines, "=unknown") || strings.Contains(lines, "ACCOUNT_READ_RPC=UNKNOWN") || strings.Contains(lines, "SECRET") || strings.Contains(fmt.Sprintf("%#v", d), "SECRET") {
+				t.Fatal("non-deterministic or unsafe diagnostic")
+			}
+		})
+	}
+	t.Run("blocked_read_timeout", func(t *testing.T) {
+		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+		defer cancel()
+		s := &deterministicAccountSession{closed: make(chan struct{})}
+		d := ReadRuntimeHomeAccountDiagnostics(ctx, s)
+		if lines := strings.Join(d.Lines(), "\n"); !strings.Contains(lines, "classification=ACCOUNT_READ_TIMEOUT") || !strings.Contains(lines, "ACCOUNT_READ_REQUEST=PASS") {
+			t.Fatal("blocked read did not terminate safely")
+		}
+	})
+	t.Run("write_failure", func(t *testing.T) {
+		d := ReadRuntimeHomeAccountDiagnostics(context.Background(), &deterministicAccountSession{writeErr: errors.New("SECRET_WRITE")})
+		lines := strings.Join(d.Lines(), "\n")
+		if !strings.Contains(lines, "ACCOUNT_READ_REQUEST=FAIL") || !strings.Contains(lines, "ACCOUNT_READ_RPC=FAIL") || strings.Contains(lines, "SECRET") {
+			t.Fatal("write failure not closed")
+		}
+	})
 }
 
 func TestRuntimeHomeDockerCapturePreservesUntilDestroy(t *testing.T) {
