@@ -121,6 +121,11 @@ func NewRuntimeHomeDockerContainer(hosts string) (*RuntimeHomeDockerContainer, e
 }
 
 func (c *RuntimeHomeDockerContainer) Prepare(ctx context.Context, archive io.Reader) error {
+	return c.prepare(ctx, archive, runtimeHomeCreateOptions)
+}
+
+// Private composition seam; callers cannot supply container options.
+func (c *RuntimeHomeDockerContainer) prepare(ctx context.Context, archive io.Reader, createOptions func(string) client.ContainerCreateOptions) error {
 	if c == nil || c.driver == nil || c.egress != nil || c.destroyed {
 		return errors.New("runtime preparation rejected")
 	}
@@ -129,7 +134,7 @@ func (c *RuntimeHomeDockerContainer) Prepare(ctx context.Context, archive io.Rea
 		return errors.New("runtime egress unavailable")
 	}
 	c.egress = owned.(*ownedCodexEgress)
-	opts := runtimeHomeCreateOptions(c.egress.private)
+	opts := createOptions(c.egress.private)
 	bounded, cancel := context.WithTimeout(ctx, dockerOperationTimeout)
 	defer cancel()
 	created, err := c.driver.client.ContainerCreate(bounded, opts)
