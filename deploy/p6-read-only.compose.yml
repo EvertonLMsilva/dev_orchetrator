@@ -1,0 +1,54 @@
+# No automatic registration or LIVE test. Provision private operational storage
+# and the existing P6.4 runtime-auth session before explicitly starting P6.6.
+services:
+  orchestrator:
+    image: dev-orchestrator-p6-read-only
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    read_only: true
+    init: true
+    restart: "no"
+    stop_grace_period: 60s
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    command: [sh, -c, "go build -o /tmp/orchestrator ./cmd/orchestrator && exec /tmp/orchestrator -config /run/config/p6.json"]
+    environment:
+      GOCACHE: /tmp/go-build
+      GOPROXY: "off"
+    tmpfs:
+      - /tmp:rw,nosuid,nodev,size=512m
+    volumes:
+      - type: bind
+        source: ${P6_PILOT_WORKSPACE:?explicit pilot workspace required}
+        target: /pilot
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${P6_CONFIG_FILE:?explicit public config required}
+        target: /run/config/p6.json
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: volume
+        source: operational
+        target: /var/lib/dev-orchestrator
+      - type: volume
+        source: runtime-auth
+        target: /var/lib/dev-orchestrator/runtime-auth
+      # Existing runtime owns its child containers and egress policy. This
+      # privileged daemon interface is never exposed to Discord/model input.
+      - /var/run/docker.sock:/var/run/docker.sock
+    secrets:
+      - discord_token
+volumes:
+  operational:
+    external: true
+    name: ${P6_OPERATIONAL_VOLUME:?preprovisioned private storage required}
+  runtime-auth:
+    external: true
+    name: ${P6_RUNTIME_AUTH_VOLUME:?existing provisioned P6.4 auth volume required}
+secrets:
+  discord_token:
+    file: ${P6_DISCORD_TOKEN_FILE:?explicit provisioned Discord credential required}

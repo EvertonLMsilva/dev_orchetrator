@@ -62,7 +62,11 @@ func commandDefinitions() []sdk.ApplicationCommandCreate {
 // RegisterCommands explicitly registers the commands using a caller-supplied
 // application ID. Construction and Open never register commands remotely.
 func (g *Gateway) RegisterCommands(ctx context.Context, applicationID snowflake.ID) error {
-	for _, command := range commandDefinitions() {
+	definitions := commandDefinitions()
+	if g.conversation != nil {
+		definitions = conversationDefinitions()
+	}
+	for _, command := range definitions {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
@@ -81,6 +85,9 @@ func (g *Gateway) handleInteraction(ctx context.Context, event gateway.EventInte
 	data, ok := interaction.Data.(sdk.SlashCommandInteractionData)
 	if !ok {
 		return nil
+	}
+	if g.conversation != nil {
+		return g.handleConversation(ctx, interaction, data)
 	}
 	var optionName string
 	switch data.CommandName() {
