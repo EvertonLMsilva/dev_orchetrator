@@ -31,6 +31,7 @@ type Gateway struct {
 	approvals           approvalService
 	commands            commandClient
 	conversation        conversationService
+	development         bool
 	conversationCtx     context.Context
 	conversationCancel  context.CancelFunc
 	conversationMu      sync.Mutex

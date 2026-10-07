@@ -19,10 +19,11 @@ var ErrStorage = errors.New("invalid or unavailable task storage")
 const maxStateBytes = 1024 * 1024
 
 type TaskRepository struct {
-	mu     sync.RWMutex
-	dir    string
-	tasks  map[domain.TaskID]domain.Task
-	failed bool
+	mu          sync.RWMutex
+	dir         string
+	tasks       map[domain.TaskID]domain.Task
+	failed      bool
+	development bool
 }
 
 var _ ports.TaskRepository = (*TaskRepository)(nil)
@@ -30,12 +31,20 @@ var _ ports.TaskRepository = (*TaskRepository)(nil)
 // The composition owns the directory and exclusive process lease. Files are
 // opened through Root; snapshots are bounded and replaced atomically.
 func NewTaskRepository(dir string) (*TaskRepository, error) {
+	return newTaskRepository(dir, false)
+}
+
+// Explicit trusted composition opt-in; the P6 constructor stays READ-only.
+func NewDevelopmentTaskRepository(dir string) (*TaskRepository, error) {
+	return newTaskRepository(dir, true)
+}
+func newTaskRepository(dir string, development bool) (*TaskRepository, error) {
 	root, err := os.OpenRoot(dir)
 	if err != nil {
 		return nil, ErrStorage
 	}
 	defer root.Close()
-	r := &TaskRepository{dir: dir, tasks: map[domain.TaskID]domain.Task{}}
+	r := &TaskRepository{dir: dir, tasks: map[domain.TaskID]domain.Task{}, development: development}
 	if _, e := root.Lstat("tasks.pending"); !errors.Is(e, os.ErrNotExist) {
 		return nil, ErrStorage
 	}
@@ -69,7 +78,7 @@ func NewTaskRepository(dir string) (*TaskRepository, error) {
 		return nil, ErrStorage
 	}
 	for _, t := range tasks {
-		if !validTask(t) {
+		if !r.validTask(t) {
 			return nil, ErrStorage
 		}
 		if _, ok := r.tasks[t.ID]; ok {
@@ -143,11 +152,24 @@ func validTask(t domain.Task) bool {
 	}
 	return false
 }
+func (r *TaskRepository) validTask(t domain.Task) bool {
+	if validTask(t) {
+		return true
+	}
+	if !r.development || strings.TrimSpace(string(t.ID)) == "" || strings.TrimSpace(string(t.ProjectID)) == "" || t.Title != "Conversation request" {
+		return false
+	}
+	switch t.Status {
+	case domain.TaskStatusReadyForCodex, domain.TaskStatusInProgress, domain.TaskStatusDone, domain.TaskStatusFailed:
+		return true
+	}
+	return false
+}
 func (r *TaskRepository) Save(ctx context.Context, t domain.Task) (result error) {
 	if ctx.Err() != nil {
 		return ctx.Err()
 	}
-	if !validTask(t) {
+	if !r.validTask(t) {
 		return ErrStorage
 	}
 	r.mu.Lock()

@@ -1,0 +1,23 @@
+{
+  "ProjectID": "mvp2-pilot",
+  "TaskID": "mvp2-task",
+  "CorrelationID": "0123456789abcdef0123456789abcdef",
+  "Branch": "codex/mvp2-pilot",
+  "PolicyVersion": "mvp2-v1",
+  "Policy": {
+    "InputTargets": [],
+    "WriteTargets": ["note.txt"],
+    "ExcludedTargets": [],
+    "Limits": {"MaxOperations": 1, "MaxFileBytes": 256, "MaxTotalBytes": 256, "MaxPathBytes": 256, "MaxOutputBytes": 8192}
+  },
+  "Route": {"GuildID": "1", "ChannelID": "2"},
+  "Mappings": [{"Evidence": {"Provider": "discord", "ExternalID": "3"}, "Principal": {"ID": "pilot-operator"}}],
+  "Grants": [
+    {"PrincipalID": "pilot-operator", "ProjectID": "mvp2-pilot", "Operation": "WRITE_APPLY"},
+    {"PrincipalID": "pilot-operator", "ProjectID": "mvp2-pilot", "Operation": "GIT_BRANCH"},
+    {"PrincipalID": "pilot-operator", "ProjectID": "mvp2-pilot", "Operation": "GIT_COMMIT"}
+  ],
+  "ControlRoot": "/pilot/control",
+  "ScratchRoot": "/pilot/scratch",
+  "StateRoot": "/pilot/state"
+}
