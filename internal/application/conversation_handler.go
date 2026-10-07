@@ -10,6 +10,10 @@ import (
 type ConversationInput struct {
 	Source ConversationSource
 	Text   string
+	// Evidence is supplied by the verified adapter event, never parsed from Text.
+	Actor             ports.ActorEvidence
+	DevelopmentAction string
+	Confirmation      string
 }
 type ConversationResponse struct {
 	Status  string

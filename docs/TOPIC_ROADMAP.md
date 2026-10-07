@@ -19,8 +19,8 @@ resultado → usuário/Channel. O E2E P6.6 é READ-ONLY; MCP READ não executa e
 | P6: runtime autenticado do Planner e Discord READ E2E | DONE | P6.4/P6.5/P6.6 CLOSED; B-P5-001 fechado somente no escopo runtime/composição. |
 | MCP READ operacional | DONE | MCP-7 DONE — aprovado pelo Planner; EXTERNAL_E2E=PASS. Review isolado MCP-5 permanece conforme seu registro, sem novo aceite inferido. |
 | P10.1–P10.3: candidato, autorização e aplicação mediada recuperável | DONE | CLOSED — PLANNER_REVIEW APPROVED; prova determinística, sem provider concreto/LIVE ou composição produtiva aceitos. |
-| P10.4: aceite do Git local controlado | MVP_GATE | IMPLEMENTED — PLANNER_REVIEW_PENDING; branch/commit locais bastam ao piloto, sem exigir nova implementação por ausência de review. |
-| Ciclo de desenvolvimento LIVE integrado e seguro | MVP_GATE | Provider tool-free concreto, composição dos componentes aceitos e prova piloto ainda pendentes; uma entrega funcional coesa. |
+| P10.4: aceite do Git local controlado | DONE | CLOSED — PLANNER_REVIEW APPROVED em 2026-10-07; Git local aceito. |
+| Ciclo de desenvolvimento LIVE integrado e seguro | MVP_GATE | MVP-2 implementa provider concreto, ator/grants/issuance e composição com confirmações separadas; validação/evidência em P10. E2E LIVE continua pendente. |
 | Executor LIVE pelo adapter legado P4 | BLOCKED | B-P4-001 OPEN nesse caminho; não declarado resolvido por P6 ou por implementação P10. |
 | MCP-8, P10.5/P10.6 e P7–P9 | POST_MVP | Não indispensáveis ao primeiro ciclo local; não iniciados por esta reconciliação. |
 | TD-P4-001 e histórico B-P4-001 para o caminho legado | DEBT_NON_BLOCKING | Continuam abertos no escopo legado; não bloqueiam automaticamente MODEL_D. A prova LIVE de MODEL_D continua sendo MVP_GATE. |
@@ -34,11 +34,11 @@ MODEL_D produz proposta estrita sem ferramentas, aplicada por componentes truste
 
 ## Caminho mínimo restante para MVP
 
-MVP_REMAINING_DELIVERIES: 2
+MVP_REMAINING_DELIVERIES: 1
 
 ### MVP-1 — Aceite do Git local controlado existente
 
-Estado: MVP_GATE — P10.4 IMPLEMENTED — PLANNER_REVIEW_PENDING, sem CLOSED inferido.
+Estado: DONE — P10.4 CLOSED — PLANNER_REVIEW APPROVED, decisão explícita do Planner.
 Dependências: P10.1–P10.3 aceitos; implementação/testes P10.4 no PR #7, bfe8870.
 Prova de aceite: review do Planner confirma que provisionamento/baseline e
 metadata registrados preservam a autoridade do ManagedWorkspace e que branch/
@@ -50,12 +50,12 @@ adicional; o blocker antigo de discovery Git não é reaberto.
 
 ### MVP-2 — Ciclo LIVE de desenvolvimento em um piloto controlado
 
-Estado: MVP_GATE — integração e evidência operacional não comprovadas.
+Estado: MVP_GATE — implementação integrada em validação; E2E LIVE pendente.
 Dependências: MVP-1 aceito; P5/P6 e P10.1–P10.3 preservados; task refinada e
 autorização explícita do Planner antes de implementação/ensaio LIVE. Provider
-CandidateGenerator concreto tool-free, configuração trusted de policy/approval
-e composição produtiva com ManagedWorkspace são partes ainda faltantes desta
-entrega, não componentes presumidos prontos. Não reutilizar o Executor legado
+CandidateGenerator concreto tool-free, configuração trusted de actor/grants e
+approval issuer, além da composição com ManagedWorkspace, estão implementados
+no MVP-2. Isso não substitui o aceite da prova LIVE. Não reutilizar o Executor legado
 bloqueado nem habilitar WRITE na composição READ-ONLY P6 como atalho.
 Prova de aceite: uma solicitação real no Channel origina task/IDs confiáveis;
 Planner prepara a tarefa e o Executor MODEL_D autenticado gera candidato em cópia

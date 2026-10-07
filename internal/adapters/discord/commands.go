@@ -65,6 +65,9 @@ func (g *Gateway) RegisterCommands(ctx context.Context, applicationID snowflake.
 	definitions := commandDefinitions()
 	if g.conversation != nil {
 		definitions = conversationDefinitions()
+		if g.development {
+			definitions = developmentDefinitions()
+		}
 	}
 	for _, command := range definitions {
 		if err := ctx.Err(); err != nil {

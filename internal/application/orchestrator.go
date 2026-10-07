@@ -15,12 +15,23 @@ type EvidenceTransport interface {
 var ErrInvalidOrchestrator = errors.New("orchestrator dependencies are required")
 
 type Orchestrator struct {
-	builder       *ContextBuilder
-	planner       ports.Planner
-	resolver      EvidenceRequestResolver
-	transport     EvidenceTransport
-	metadata      BotCommandMetadata
-	executorCycle *ExecutorCycleConfig
+	builder                  *ContextBuilder
+	planner                  ports.Planner
+	resolver                 EvidenceRequestResolver
+	transport                EvidenceTransport
+	metadata                 BotCommandMetadata
+	executorCycle            *ExecutorCycleConfig
+	candidatePreparationOnly bool
+}
+
+// NewCandidatePlanningOrchestrator reuses canonical context and Planner round
+// validation for MODEL_D. It prepares intention only; the separately confirmed
+// P10 candidate/application cycle owns effects and terminal task evidence.
+// No legacy Executor, LocalAgent, or effect capability is configured here.
+func NewCandidatePlanningOrchestrator(builder *ContextBuilder, planner ports.Planner) *Orchestrator {
+	o := NewOrchestrator(builder, planner, nil, nil, BotCommandMetadata{})
+	o.candidatePreparationOnly = true
+	return o
 }
 
 func NewOrchestrator(builder *ContextBuilder, planner ports.Planner, resolver EvidenceRequestResolver, transport EvidenceTransport, metadata BotCommandMetadata, executorCycle ...ExecutorCycleConfig) *Orchestrator {
@@ -141,6 +152,9 @@ func sameExecutorCorrelation(a, b domain.Envelope) bool {
 	return *a.SessionID == *b.SessionID
 }
 func (o *Orchestrator) finish(ctx context.Context, d ports.PlannerDecision, canonical PlannerContext) (OrchestrationOutput, error) {
+	if o.candidatePreparationOnly {
+		return OrchestrationOutput{Decision: d}, nil
+	}
 	if d.Type != ports.PlannerDecisionPrepareExecutor {
 		return OrchestrationOutput{Decision: d}, nil
 	}

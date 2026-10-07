@@ -3,6 +3,7 @@ package discord
 import (
 	"context"
 	"dev-orchestrator/internal/application"
+	"dev-orchestrator/internal/ports"
 	"encoding/json"
 	"errors"
 	sdk "github.com/disgoorg/disgo/discord"
@@ -35,23 +36,64 @@ func (g *Gateway) SetConversationService(ctx context.Context, service conversati
 	g.conversationCtx, g.conversationCancel = context.WithCancel(ctx)
 	return nil
 }
+
+// Development is selected only by the trusted pilot composition.
+func (g *Gateway) SetDevelopmentService(ctx context.Context, service conversationService) error {
+	if err := g.SetConversationService(ctx, service); err != nil {
+		return err
+	}
+	g.development = true
+	return nil
+}
+func developmentDefinitions() []sdk.ApplicationCommandCreate {
+	max := 1024
+	return []sdk.ApplicationCommandCreate{
+		sdk.SlashCommandCreate{Name: "develop", Description: "Propose a controlled pilot file change", Options: []sdk.ApplicationCommandOption{sdk.ApplicationCommandOptionString{Name: "intent", Description: "Requested file change", Required: true, MaxLength: &max}}},
+		sdk.SlashCommandCreate{Name: "develop-confirm", Description: "Confirm the exact displayed operation", Options: []sdk.ApplicationCommandOption{sdk.ApplicationCommandOptionString{Name: "identity", Description: "Displayed operation identity", Required: true}}},
+		sdk.SlashCommandCreate{Name: "develop-cancel", Description: "Block the current pilot task"},
+	}
+}
 func conversationDefinitions() []sdk.ApplicationCommandCreate {
 	max := 1024
 	return []sdk.ApplicationCommandCreate{sdk.SlashCommandCreate{Name: "analyze", Description: "Analyze with read-only evidence", Options: []sdk.ApplicationCommandOption{sdk.ApplicationCommandOptionString{Name: "intent", Description: "Declarative intent", Required: true, MaxLength: &max}}}}
 }
 func (g *Gateway) handleConversation(ack context.Context, i sdk.ApplicationCommandInteraction, data sdk.SlashCommandInteractionData) error {
-	if data.CommandName() != "analyze" {
+	action, optionName := "", "intent"
+	if g.development {
+		switch data.CommandName() {
+		case "develop":
+			action = "begin"
+		case "develop-confirm":
+			action = "confirm"
+			optionName = "identity"
+		case "develop-cancel":
+			action = "cancel"
+		default:
+			return nil
+		}
+	} else if data.CommandName() != "analyze" {
 		return nil
 	}
 	if i.GuildID() == nil || i.Channel().ID() == 0 {
 		return nil
 	}
-	option, present := data.Option("intent")
+	option, present := data.Option(optionName)
 	var text string
-	if !present || option.Type != sdk.ApplicationCommandOptionTypeString || json.Unmarshal(option.Value, &text) != nil {
+	if action != "cancel" && (!present || option.Type != sdk.ApplicationCommandOptionTypeString || json.Unmarshal(option.Value, &text) != nil) {
 		return nil
 	}
 	input := application.ConversationInput{Source: application.ConversationSource{GuildID: i.GuildID().String(), ChannelID: i.Channel().ID().String()}, Text: text}
+	if g.development {
+		if i.User().ID == 0 {
+			return nil
+		}
+		input.Actor = ports.ActorEvidence{Provider: "discord", ExternalID: i.User().ID.String()}
+		input.DevelopmentAction = action
+		if action == "confirm" {
+			input.Confirmation = text
+			input.Text = ""
+		}
+	}
 	g.conversationMu.Lock()
 	if g.conversationStopped || g.conversationCtx.Err() != nil {
 		g.conversationMu.Unlock()
