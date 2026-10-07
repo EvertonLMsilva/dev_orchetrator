@@ -1,5 +1,97 @@
 # Roadmap operacional
 
+## MVP — estado vigente
+
+Reconciliação documental em 2026-10-07, conforme aceites do Planner e registros
+[P5](tasks/P5.md), [P6](tasks/P6.md), [P10](tasks/P10.md) e [MCP](tasks/MCP.md).
+Esta seção é canônica; os blocos HISTÓRICO/SUPERSEDED abaixo preservam evidência
+e não reabrem entregas aceitas nem concedem autorização para novas execuções.
+
+MVP funcional ainda não aceito: falta provar uma tarefa de desenvolvimento em
+UM projeto piloto pelo ciclo Usuário/Channel → Orchestrator → Planner → task
+controlada → Executor → alteração mediada → Git local controlado → evidência/
+resultado → usuário/Channel. O E2E P6.6 é READ-ONLY; MCP READ não executa esse ciclo.
+
+| Capacidade | Classificação | Evidência ou gate vigente |
+| --- | --- | --- |
+| P0–P4: contratos, Channel, READ, Planner e Executor determinístico | DONE | Implementações aceitas; não equivale a Executor LIVE autenticado. |
+| P5: orquestração de aplicação | DONE | Fechamento técnico preservado; composição operacional comprovada por P6. |
+| P6: runtime autenticado do Planner e Discord READ E2E | DONE | P6.4/P6.5/P6.6 CLOSED; B-P5-001 fechado somente no escopo runtime/composição. |
+| MCP READ operacional | DONE | MCP-7 DONE — aprovado pelo Planner; EXTERNAL_E2E=PASS. Review isolado MCP-5 permanece conforme seu registro, sem novo aceite inferido. |
+| P10.1–P10.3: candidato, autorização e aplicação mediada recuperável | DONE | CLOSED — PLANNER_REVIEW APPROVED; prova determinística, sem provider concreto/LIVE ou composição produtiva aceitos. |
+| P10.4: aceite do Git local controlado | MVP_GATE | IMPLEMENTED — PLANNER_REVIEW_PENDING; branch/commit locais bastam ao piloto, sem exigir nova implementação por ausência de review. |
+| Ciclo de desenvolvimento LIVE integrado e seguro | MVP_GATE | Provider tool-free concreto, composição dos componentes aceitos e prova piloto ainda pendentes; uma entrega funcional coesa. |
+| Executor LIVE pelo adapter legado P4 | BLOCKED | B-P4-001 OPEN nesse caminho; não declarado resolvido por P6 ou por implementação P10. |
+| MCP-8, P10.5/P10.6 e P7–P9 | POST_MVP | Não indispensáveis ao primeiro ciclo local; não iniciados por esta reconciliação. |
+| TD-P4-001 e histórico B-P4-001 para o caminho legado | DEBT_NON_BLOCKING | Continuam abertos no escopo legado; não bloqueiam automaticamente MODEL_D. A prova LIVE de MODEL_D continua sendo MVP_GATE. |
+
+Invariantes do MVP: autorização explícita por ator autenticado/autorizado,
+fail-closed, workspace confinado e single-writer, WRITE mediado, gates Git
+separados, auditoria/evidência correlacionadas, limites e possibilidade de BLOCK/
+escalation. Channel não emite autoridade; nem ALLOW textual, provider DONE ou
+WRITE simbólico autorizam efeitos. Executor não recebe workspace real/.git;
+MODEL_D produz proposta estrita sem ferramentas, aplicada por componentes trusted.
+
+## Caminho mínimo restante para MVP
+
+MVP_REMAINING_DELIVERIES: 2
+
+### MVP-1 — Aceite do Git local controlado existente
+
+Estado: MVP_GATE — P10.4 IMPLEMENTED — PLANNER_REVIEW_PENDING, sem CLOSED inferido.
+Dependências: P10.1–P10.3 aceitos; implementação/testes P10.4 no PR #7, bfe8870.
+Prova de aceite: review do Planner confirma que provisionamento/baseline e
+metadata registrados preservam a autoridade do ManagedWorkspace e que branch/
+commit locais possuem autorização exata, efeitos limitados ao candidato aplicado,
+evidência e rejeição de replay/divergência/falha. O escopo implementado cobre as
+operações locais necessárias; sua suficiência segura depende desse aceite,
+não de push/PR/merge. Só um gap concreto do review justificará implementação
+adicional; o blocker antigo de discovery Git não é reaberto.
+
+### MVP-2 — Ciclo LIVE de desenvolvimento em um piloto controlado
+
+Estado: MVP_GATE — integração e evidência operacional não comprovadas.
+Dependências: MVP-1 aceito; P5/P6 e P10.1–P10.3 preservados; task refinada e
+autorização explícita do Planner antes de implementação/ensaio LIVE. Provider
+CandidateGenerator concreto tool-free, configuração trusted de policy/approval
+e composição produtiva com ManagedWorkspace são partes ainda faltantes desta
+entrega, não componentes presumidos prontos. Não reutilizar o Executor legado
+bloqueado nem habilitar WRITE na composição READ-ONLY P6 como atalho.
+Prova de aceite: uma solicitação real no Channel origina task/IDs confiáveis;
+Planner prepara a tarefa e o Executor MODEL_D autenticado gera candidato em cópia
+independente com TOOLS=EMPTY. Aprovação contextual por ator autorizado permite
+WRITE_APPLY exato pelo mediated applier, seguido de branch/commit locais sob seus
+gates próprios. Resultado, hashes/recibos Git e evidência correlacionada retornam
+ao usuário, com TaskState controlado pelo WorkflowEngine e sem depender do summary
+do modelo para declarar sucesso. Comprovar no mesmo aceite negação sem efeitos
+para ausência/divergência/replay de autorização, BLOCK/escalation, limites,
+persistência e shutdown/cleanup; regressão oficial Linux/Docker GREEN.
+
+A documentação P10 registra ports/pipeline/candidato, store/applier recuperável
+e Git local; isso permite agrupar provider concreto, composição e ensaio numa
+única entrega E2E, sem declarar que já estão ligados. Refinamento deve delimitar
+os arquivos e a autoridade do piloto provisionado, sem importar/adotar workspace
+externo nem criar outra arquitetura. Se essa integração revelar dependência
+indispensável não documentada, retornar ao Planner com o boundary exato.
+
+B-P4-001 continua OPEN para o adapter legado; não é evidência de falha no novo
+provider tool-free ainda não provado. Se o piloto depender do caminho legado,
+esse blocker volta a ser dependência bloqueante explícita. Nenhum LIVE, nova
+implementação ou mudança de contrato é autorizado por este roadmap.
+
+## Pós-MVP
+
+- P10.5: push remoto e publicação/PR controlados; NOT_STARTED, não autorizados.
+- P10.6: merge explicitamente autorizado; NOT_STARTED, não autorizado.
+- MCP-8: POST_MVP; permanece NEXT no tópico MCP, não iniciado nem automaticamente
+  autorizado. MCP-7 satisfaz a necessidade READ já aceita; MCP WRITE não é requisito
+  para usar um Channel autorizado no piloto de desenvolvimento.
+- P7–P9: hardening avançado, multiprojeto e autonomia contínua, após refinamento.
+
+Push, PR e merge não são gates do piloto local. Reparos do caminho Executor
+legado/TD-P4-001 permanecem dívida restrita ao escopo afetado; não equivalem a
+aceite de Executor LIVE nem justificam reabrir P6 ou B-P5-001.
+
 ## MCP — camada READ interna
 
 | Entrega | Estado | Escopo |
@@ -21,7 +113,9 @@ MCP-7 teve aceite operacional e E2E externo aprovados pelo Planner; evidências
 registradas na [task MCP-7](tasks/MCP.md#mcp-7--production-mcp-runtime).
 MCP-8 permanece NEXT, não iniciado.
 
-## Meta do MVP — registro histórico (estado atual abaixo)
+## Meta do MVP — HISTÓRICO/SUPERSEDED
+
+Estado inicial preservado; substituído por **MVP — estado vigente** acima.
 
 Concluir P0--P5 e validar o ciclo em um projeto piloto.
 
@@ -58,7 +152,10 @@ Concluir P0--P5 e validar o ciclo em um projeto piloto.
 P0–P4 concluídos. P4 implementation DONE; P5 — Orquestração é NEXT.
 Execução live autenticada P4 permanece BLOCKED por B-P4-001.
 
-## Estado dos tópicos P4
+## Estado dos tópicos P4 — histórico de implementação/review preservado
+
+As referências a P5=NEXT neste bloco são HISTÓRICO/SUPERSEDED. B-P4-001 e
+TD-P4-001 não têm evidência de fechamento; seu escopo vigente está no quadro MVP.
 
 | Tópico | Estado |
 | --- | --- |
@@ -104,13 +201,13 @@ Final Pre-PR Review após P4.6.5–P4.6.7: `STATUS=DONE`,
 P4 permanece DONE; P5 permanece NEXT. Validação live autenticada permanece
 BLOCKED; `B-P4-001=OPEN`, `TD-P4-001=OPEN`, `B-P4-002=NOT_NEEDED`.
 
-## Dependência
+## Dependência — HISTÓRICO/SUPERSEDED pelo caminho mínimo MVP
 
 `P0 → P1/P2 → P3 → P4 → P5 → P6/P7 → P8 → P9`
 
 P1 e P2 podem avançar após os contratos necessários de P0.
 
-## Discovery obrigatório
+## Discovery obrigatório — histórico dos gates P3/P4
 
 P3 começa verificando interfaces oficiais atuais para integração
 programática do Planner. P4 começa verificando interfaces oficiais
@@ -122,9 +219,11 @@ antecipadamente API, SDK, CLI, app-server, exec-server, autenticação, sessão 
 Executar somente a menor task desbloqueada. Detalhes estão em
 `docs/tasks/P*.md`.
 
-## Fechamento P5 — estado atual
+## Fechamento P5 — HISTÓRICO/SUPERSEDED no escopo runtime/composição
 
 Esta atualização substitui o estado histórico P5=NEXT acima.
+O fechamento de aplicação permanece válido; B-P5-001 foi posteriormente fechado
+por P6.4–P6.6, conforme o estado vigente acima e P6.md.
 
 | Escopo | Estado |
 | --- | --- |
@@ -140,7 +239,7 @@ Fonte ChatGPT autorizada → app-server autenticado → Planner concreto → com
 root → Discord operacional E2E. A prioridade/numeração do tópico Git histórico
 fica para o Planner. Nenhum runtime autenticado foi implementado neste fechamento.
 
-## Estado operacional reconciliado — 2026-10-06
+## Estado operacional — HISTÓRICO/SUPERSEDED (2026-10-06, antes do aceite P6)
 
 Este quadro substitui os estados iniciais/históricos acima. O fechamento P5
 continua válido como registro daquele momento; P6 já foi implementado parcialmente.
@@ -166,7 +265,10 @@ impede composição operacional; teste LIVE local não rastreado não é entrega
 A causa histórica de B-P5-001 (ausência de Planner concreto) foi parcialmente
 superada; o blocker de produção permanece até fechamento dos gates P6.
 
-## Caminho restante até primeiro LIVE e Discord real
+## Primeiro LIVE e Discord real — HISTÓRICO/SUPERSEDED
+
+As três entregas P6.4/P6.5/P6.6 abaixo foram concluídas/aceitas. Não são gates
+restantes do MVP de desenvolvimento; o escopo READ-ONLY aceito foi preservado.
 
 | Entrega funcional | Dependências | Resultado verificável |
 | --- | --- | --- |
@@ -193,7 +295,7 @@ por teste, arquivo ou fase; autorização deve cobrir o ciclo completo refinado
 segundo TASK_SPEC. Preferir término em capacidade verificável, regressão GREEN
 e commit significativo. Uma capacidade por execução, sem refatoração lateral.
 P6 inteiro = uma branch/PR; subdivisões históricas são rastreabilidade.
-Dependência operacional atual: P5 application DONE → P6.4 → P6.5 → P6.6;
+Dependência operacional histórica já satisfeita: P5 application DONE → P6.4 → P6.5 → P6.6;
 mediated WRITE/Git, P7–P9 ficam posteriores e dependem de refinamento do Planner.
 
 ## P10 — estado atual após implementação no PR #7
