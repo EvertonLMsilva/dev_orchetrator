@@ -16,7 +16,9 @@ import (
 )
 
 // Git read commands can invoke clean filters from repository configuration.
-// Accept only inert configuration keys before entering the existing executors.
+// Accept inert keys, or the worktree extension only with its extra source absent,
+// before entering the existing executors. Workspaces are mounted read-only by
+// production composition; as with the other gates, checks are filesystem snapshots.
 // config --file/--no-includes only parses local data; no tool or shell authority
 // is supplied by the Planner. Its input file and output are bounded.
 func safeGitConfig(ctx context.Context, workspace string) error {
@@ -53,8 +55,27 @@ func safeGitConfig(ctx context.Context, workspace string) error {
 		if len(entry) == 0 {
 			continue
 		}
-		key, _, ok := strings.Cut(string(entry), "\n")
-		if !ok || !inertGitKey(key) {
+		key, value, ok := strings.Cut(string(entry), "\n")
+		if !ok {
+			return application.ErrReadOnlyDenied
+		}
+		if key == "extensions.worktreeconfig" {
+			// This extension is active, not inert: Git reads config.worktree
+			// before command-scope overrides. Admit only the primary local
+			// repository with no such configuration source. Lstat also denies
+			// dangling links and every error other than confirmed absence.
+			head, err := os.Lstat(filepath.Join(metadata, "HEAD"))
+			if value != "true" || err != nil || !head.Mode().IsRegular() {
+				return application.ErrReadOnlyDenied
+			}
+			for _, name := range []string{"commondir", "config.worktree"} {
+				if _, err := os.Lstat(filepath.Join(metadata, name)); !errors.Is(err, os.ErrNotExist) {
+					return application.ErrReadOnlyDenied
+				}
+			}
+			continue
+		}
+		if !inertGitKey(key) {
 			return application.ErrReadOnlyDenied
 		}
 	}
