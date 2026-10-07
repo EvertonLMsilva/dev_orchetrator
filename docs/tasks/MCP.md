@@ -2,9 +2,30 @@
 
 ## MCP-7 — Production MCP Runtime
 
-MCP7_IMPLEMENTATION=IMPLEMENTATION_COMPLETE;
-LOCAL_VALIDATION=LOCAL_VALIDATION_COMPLETE; EXTERNAL_E2E=EXTERNAL_E2E_PENDING.
-MCP-7 não está DONE; aceite externo é responsabilidade do Planner. MCP-8 permanece NEXT.
+Estado: DONE — aprovado pelo Planner; MCP7_IMPLEMENTATION=IMPLEMENTATION_COMPLETE;
+LOCAL_VALIDATION=LOCAL_VALIDATION_COMPLETE; EXTERNAL_E2E=PASS.
+MCP-8 permanece NEXT, não iniciado.
+
+Aceite operacional externo aprovado pelo Planner em 2026-10-07: startup oficial
+via `scripts/mcp-runtime.ps1`, build runtime, `/readyz` e OpenAI Secure MCP Tunnel
+em foreground PASS. E2E real ChatGPT → Tunnel → MCP:
+
+| Operação | Resultado aprovado | CorrelationID |
+| --- | --- | --- |
+| project.status | PASS | mcp7-final-status-003 |
+| project.tasks | PASS; tasks=[]; hasMore=false | mcp7-final-tasks-003 |
+| git.status | PASS; changedEntries=242 | mcp7-final-git-003 |
+| execution.status | PASS; executionObservation=UNAVAILABLE | mcp7-final-exec-003 |
+
+Durable audit confirmado no volume `dev-orchestrator-mcp-state`: as quatro
+correlações atuais têm RECEIVED → AUTHORIZED → SUCCESS; eventos anteriores,
+incluindo `mcp7-external-status-002`, sobreviveram ao restart. Projeto
+`mcp7-unauthorized-project`, correlação `mcp7-final-deny-003`: RECEIVED →
+AUTHORIZATION_DENIED, sem AUTHORIZED ou READ posterior. Após Ctrl+C, o container
+`dev-orchestrator-mcp-orchestrator-1` terminou com `Exited (0)`.
+
+Correção de git.status mergeada no PR #11, commit
+`ad47c9a2d6389d92a595d23189b3dc198c91d531`, e comprovada no E2E externo acima.
 
 Operação oficial no Windows: `./scripts/mcp-runtime.ps1`. Fornecer externamente
 CONTROL_PLANE_API_KEY, MCP_CLIENT_TOKEN e CONTROL_PLANE_TUNNEL_ID. Defaults:
