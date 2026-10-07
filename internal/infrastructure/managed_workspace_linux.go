@@ -37,6 +37,7 @@ type managedRecord struct {
 	Lease     *managedLease
 }
 type managedLease struct {
+	Kind            string `json:",omitempty"`
 	WorkspaceID     string
 	Generation      uint64
 	TransactionID   string
@@ -59,10 +60,13 @@ type writeJournal struct {
 	Parents       map[string]string
 }
 type managedDatabase struct {
-	Version    int
-	Workspaces map[string]managedRecord
-	Approvals  map[domain.ApprovalID]domain.WriteApprovalRecord
-	Journals   map[string]writeJournal
+	Version       int
+	Workspaces    map[string]managedRecord
+	Approvals     map[domain.ApprovalID]domain.WriteApprovalRecord
+	Journals      map[string]writeJournal
+	Repositories  map[string]domain.ManagedRepositoryIdentity `json:",omitempty"`
+	GitApprovals  map[string]gitApprovalRecord                `json:",omitempty"`
+	GitOperations map[string]gitOperationRecord               `json:",omitempty"`
 }
 type managedEnvelope struct {
 	Digest string
@@ -225,7 +229,7 @@ func (s *ManagedWorkspaceStore) load() (managedDatabase, error) {
 			if l.WorkspaceID != id || l.Generation != r.Workspace.Generation || l.TransactionID == "" || l.OwnerInstanceID == "" || l.AcquiredAt.IsZero() || l.State != "HELD" || l.Version != 1 {
 				return empty, ErrManagedWriteBlocked
 			}
-			if _, ok := db.Journals[l.TransactionID]; !ok {
+			if _, ok := db.Journals[l.TransactionID]; !ok && l.Kind == "" {
 				return empty, ErrManagedWriteBlocked
 			}
 		}
@@ -283,6 +287,9 @@ func (s *ManagedWorkspaceStore) load() (managedDatabase, error) {
 				}
 			}
 		}
+	}
+	if err := validateGitDatabase(db); err != nil {
+		return empty, err
 	}
 	return db, nil
 }

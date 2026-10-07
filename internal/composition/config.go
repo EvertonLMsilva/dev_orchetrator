@@ -45,6 +45,8 @@ type Config struct {
 	MaxEvidenceBytes int
 	Projects         []ProjectConfig
 	Routes           []application.ProjectRoute
+	DisableDiscord   bool
+	MCP              *MCPInboundConfig
 }
 
 func LoadConfig(path string) (Config, error) {
@@ -142,7 +144,7 @@ func (c Config) Validate() error {
 	if c.ApplicationID != "" && !validDiscordID(c.ApplicationID) {
 		return ErrConfig
 	}
-	if c.RequestTimeout <= 0 || c.ShutdownTimeout <= 0 || c.MaxIntentBytes <= 0 || c.MaxIntentBytes > 8192 || c.MaxEvidenceBytes <= 0 || c.MaxEvidenceBytes > 32768 || len(c.Projects) == 0 || len(c.Routes) == 0 {
+	if c.RequestTimeout <= 0 || c.ShutdownTimeout <= 0 || c.MaxIntentBytes <= 0 || c.MaxIntentBytes > 8192 || c.MaxEvidenceBytes <= 0 || c.MaxEvidenceBytes > 32768 || len(c.Projects) == 0 || (!c.DisableDiscord && len(c.Routes) == 0) || (c.DisableDiscord && c.MCP == nil) {
 		return ErrConfig
 	}
 	state, e := canonicalDir(c.StateDir)
@@ -174,7 +176,7 @@ func (c Config) Validate() error {
 			}
 		}
 		roots = append(roots, root)
-		if len(p.Evidence) == 0 {
+		if !c.DisableDiscord && len(p.Evidence) == 0 {
 			return ErrConfig
 		}
 		for kind, params := range p.Evidence {
@@ -208,13 +210,16 @@ func (c Config) Validate() error {
 			}
 		}
 	}
-	if _, e := application.NewConfiguredProjectRoutes(c.Routes); e != nil {
+	if _, e := application.NewConfiguredProjectRoutes(c.Routes); !c.DisableDiscord && e != nil {
 		return ErrConfig
 	}
 	for _, r := range c.Routes {
 		if !projects[r.ProjectID] || !validDiscordID(r.Source.GuildID) || !validDiscordID(r.Source.ChannelID) {
 			return ErrConfig
 		}
+	}
+	if c.MCP != nil && validateMCP(c) != nil {
+		return ErrConfig
 	}
 	return nil
 }

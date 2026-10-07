@@ -1,5 +1,24 @@
 # Roadmap operacional
 
+## MCP — camada READ interna
+
+| Entrega | Estado | Escopo |
+| --- | --- | --- |
+| MCP-1 — READ contracts/validation | DONE — aprovado pelo Planner | DTOs e validação estrita em `internal/application/readcontracts`. |
+| MCP-2 — READ Application Boundary | DONE — aprovado pelo Planner | Dispatch interno das quatro operações aprovadas, capacidades READ existentes e projeções MCP-1. |
+| MCP-3 — Identity & Authorization Boundary | DONE — aprovado pelo Planner | AuthenticationPort, GrantRepository por requisição e grant exato Principal/Operation/Project antes do MCP-2. |
+| MCP-4 — Secure READ Runtime | DONE — aprovado pelo Planner | Auth adapter + Grants adapter + Audit fail-closed + composição segura interna. |
+| MCP-5 — External MCP Adapter & Runtime | Implementado e validado; pendente de review | Inbound adapter MCP no próprio Orchestrator, runtime existente, Docker, lifecycle/readiness e cliente MCP local real. |
+| MCP-6 — External READ E2E Completion | DONE — aprovado pelo Planner; EXTERNAL_E2E=PASS | ChatGPT/Secure MCP Tunnel → READ real; quatro tools, negação de projeto não autorizado e durable audit aprovados. AVAILABLE permanece capacidade configurada, não health operacional. |
+| MCP-7 — Production MCP Runtime | IMPLEMENTATION_COMPLETE; LOCAL_VALIDATION_COMPLETE; EXTERNAL_E2E_PENDING | Compose oficial, security em volume Linux, operação PowerShell e persistência local validados; não DONE. |
+| MCP-8 | NEXT | Não iniciado; aguarda fechamento externo do MCP-7 e refinamento do Planner. |
+
+Especificação e limites: [MCP](tasks/MCP.md). MCP-5 foi provado com cliente local;
+não houve exposição pública ou conexão ChatGPT. O inbound adapter integra o mesmo
+processo/runtime do Orchestrator; não há Gateway independente. MCP-6 comprovou
+E2E externo real via OpenAI Secure MCP Tunnel, com aceite aprovado pelo Planner.
+MCP-7 aguarda aceite E2E externo do Planner. MCP-8 permanece NEXT.
+
 ## Meta do MVP — registro histórico (estado atual abaixo)
 
 Concluir P0--P5 e validar o ciclo em um projeto piloto.

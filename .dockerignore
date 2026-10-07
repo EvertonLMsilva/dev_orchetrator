@@ -1,4 +1,9 @@
 .git
+.runtime
+**/auth.json
+**/authentication.json
+**/audit.jsonl
+**/secrets
 .tmp-go
 domain.test.exe
 bin

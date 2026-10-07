@@ -62,14 +62,17 @@ func safeGitConfig(ctx context.Context, workspace string) error {
 }
 func inertGitKey(key string) bool {
 	switch key {
-	case "core.repositoryformatversion", "core.filemode", "core.bare", "core.logallrefupdates", "core.ignorecase", "core.precomposeunicode", "core.longpaths", "user.name", "user.email":
+	case "core.repositoryformatversion", "core.filemode", "core.bare", "core.logallrefupdates", "core.ignorecase", "core.precomposeunicode", "core.longpaths", "core.symlinks", "user.name", "user.email":
+		// symlinks controls checkout representation, not code/config loading.
 		return true
 	}
 	if strings.HasPrefix(key, "remote.") {
 		return strings.HasSuffix(key, ".url") || strings.HasSuffix(key, ".fetch") || strings.HasSuffix(key, ".pushurl")
 	}
 	if strings.HasPrefix(key, "branch.") {
-		return strings.HasSuffix(key, ".remote") || strings.HasSuffix(key, ".merge")
+		// VS Code's merge-base hint is opaque editor metadata. Git READ
+		// executors do not interpret it as a command, path or include.
+		return strings.HasSuffix(key, ".remote") || strings.HasSuffix(key, ".merge") || strings.HasSuffix(key, ".vscode-merge-base")
 	}
 	return false
 }
