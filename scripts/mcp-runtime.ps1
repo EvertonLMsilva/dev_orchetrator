@@ -80,6 +80,7 @@ try {
     $env:MCP_RUNTIME_AUTHORIZATION = 'Bearer ' + $env:MCP_CLIENT_TOKEN
     # Explicit references keep credentials out of command lines. Disable file/raw logging.
     & $TunnelExecutable run --control-plane.api-key env:CONTROL_PLANE_API_KEY `
+        --health.listen-addr '127.0.0.1:0' `
         --mcp.server-url "http://127.0.0.1:$LocalPort/mcp" `
         --mcp.extra-headers 'Authorization: env:MCP_RUNTIME_AUTHORIZATION' `
         --mcp.discovery-extra-headers 'Authorization: env:MCP_RUNTIME_AUTHORIZATION' `
