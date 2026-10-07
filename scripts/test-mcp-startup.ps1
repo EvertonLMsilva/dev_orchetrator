@@ -32,8 +32,8 @@ function Remove-Job { param($Job) }
 function Invoke-WebRequest { param($Uri, [switch]$UseBasicParsing, $TimeoutSec) return @{ StatusCode = 200 } }
 $temp = Join-Path ([IO.Path]::GetTempPath()) ('mcp7-test-' + [guid]::NewGuid())
 New-Item -ItemType Directory $temp | Out-Null
-$stub = Join-Path $temp 'tunnel.cmd'
-Set-Content -LiteralPath $stub -Value '@exit /b 0'
+$stub = Join-Path $temp 'tunnel.ps1'
+Set-Content -LiteralPath $stub -Value '$global:mcp7TestTunnelArgs = @($args); $global:LASTEXITCODE = 0'
 $secretKeys = @('CONTROL_PLANE_API_KEY','MCP_CLIENT_TOKEN','CONTROL_PLANE_TUNNEL_ID')
 $old = @{}
 foreach ($key in $secretKeys) {
@@ -44,10 +44,21 @@ try {
     foreach ($failure in $false, $true) {
         $global:mcp7TestFailUp = $failure
         $global:mcp7TestCalls.Clear()
+        $global:mcp7TestTunnelArgs = @()
         $caught = $false
-        try { & "$PSScriptRoot/mcp-runtime.ps1" -ConfigFile "$temp/tunnel.cmd" -Workspace $temp -TunnelExecutable $stub -LocalPort 18088 }
+        try { & "$PSScriptRoot/mcp-runtime.ps1" -ConfigFile $stub -Workspace $temp -TunnelExecutable $stub -LocalPort 18088 }
         catch { if (!$failure) { throw }; $caught = $true }
         if ($caught -ne $failure) { throw 'Unexpected startup outcome' }
+        if (!$failure) {
+            $healthIndex = [Array]::IndexOf($global:mcp7TestTunnelArgs, '--health.listen-addr')
+            if ($healthIndex -lt 0 -or $global:mcp7TestTunnelArgs[$healthIndex + 1] -ne '127.0.0.1:0') {
+                throw 'Tunnel health listener must use an ephemeral loopback port'
+            }
+            $serverIndex = [Array]::IndexOf($global:mcp7TestTunnelArgs, '--mcp.server-url')
+            if ($serverIndex -lt 0 -or $global:mcp7TestTunnelArgs[$serverIndex + 1] -ne 'http://127.0.0.1:18088/mcp') {
+                throw 'MCP server must preserve the configured loopback port'
+            }
+        } elseif ($global:mcp7TestTunnelArgs.Count -ne 0) { throw 'Tunnel started after failed startup' }
         if (($global:mcp7TestCalls -join "`n") -match 'volume rm|down|--volumes') { throw 'Persistent storage destroyed' }
         if ($global:mcp7TestCalls[$global:mcp7TestCalls.Count - 1] -notmatch 'stop --timeout 120 orchestrator') { throw 'Missing owned runtime shutdown' }
         if (($global:mcp7TestCalls -join "`n") -notmatch '/provision.sh') { throw 'Missing security validation' }
