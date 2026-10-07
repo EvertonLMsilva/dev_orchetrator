@@ -5,6 +5,9 @@
 -   Estado de tasks e execução é persistido pelo
     Orchestrator/repositório.
 -   Planner e Executor são papéis separados.
+-   Channel, Planner e Executor são dimensões independentes e substituíveis;
+    seleção de implementações ocorre nas ports/adapters e composition root,
+    conforme [ADR 0003](adr/0003-independent-channel-planner-executor.md).
 -   ChatGPT/Planner concentra análise, arquitetura e especificação.
 -   Codex/Executor recebe somente task fechada.
 -   Agente local executa comandos controlados no PC e devolve evidência.
@@ -18,3 +21,7 @@
 -   MVP termina em P5.
 -   Integrações concretas de ChatGPT/OpenAI e Codex serão verificadas
     contra interfaces oficiais atuais antes de implementação.
+-   MCP será adapter de entrada, com primeira fase READ-ONLY e sem autoridade
+    própria sobre Git/Executor/Docker. Identidade e autorização devem ser
+    resolvidas antes da implementação; decisão em
+    [ADR 0002](adr/0002-mcp-read-only-adapter.md).

@@ -4,7 +4,17 @@
 
 Modular-first, ports/adapters. Microserviços não são requisito.
 
+Channel (interação do usuário), Planner (planejamento/decisão) e Executor
+(execução) são dimensões independentes e substituíveis. Seleção e configuração
+ocorrem fora do domínio, nas ports/adapters e composition root; nenhum Channel
+determina implementações concretas de Planner/Executor. O core permanece
+independente de fornecedores. Restrição permanente e compatibilidade:
+[ADR 0003](adr/0003-independent-channel-planner-executor.md).
+
 ## Núcleo
+
+O diagrama abaixo ilustra uma configuração concreta; Discord e Codex não
+constituem dependências obrigatórias nem vinculam as três dimensões.
 
 ``` text
 DiscordGateway
@@ -49,6 +59,15 @@ Mapeia `projectId` para workspace, políticas e configuração permitida.
 Registra eventos relevantes com correlation IDs, sem segredos.
 
 ## Fonte de verdade
+
+MCP é inbound adapter do mesmo processo Dev Orchestrator, conforme decisão
+do Planner em MCP-5. Authentication, Grants, Authorization, Audit e READ são
+fronteiras de código in-process; não são serviços/processos/containers separados.
+O Service/composition root e `cmd/orchestrator` existentes hospedam o listener
+MCP e seu lifecycle. Docker implementa deployment/isolation. Um deployment
+somente MCP READ não inicializa Planner/Executor nem requer suas credenciais;
+a seleção deles permanece independente do Channel. Configuração e limites:
+[MCP](tasks/MCP.md).
 
 Mensagens Discord são UI/transporte. Estado de projeto/task não pode
 depender de histórico de chat.
