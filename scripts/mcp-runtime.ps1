@@ -68,9 +68,9 @@ try {
     }
     Invoke-Docker ($helper + @('--entrypoint','sh','dev-orchestrator-mcp-read-only','/provision.sh')) | Out-Null
     Invoke-Docker @('run','--rm','--network','none','--read-only','--cap-drop','ALL','--security-opt','no-new-privileges:true',
-        '--mount',"type=volume,source=$env:MCP_OPERATIONAL_VOLUME,target=/state",'--entrypoint','sh',
-        'dev-orchestrator-mcp-read-only','-eu','-c',
-        'if test ! -e /state/state; then mkdir -m 700 /state/state; fi; test -d /state/state; test ! -L /state/state; test "$(stat -c %u:%a /state/state)" = 0:700') | Out-Null
+        '--mount',"type=volume,source=$env:MCP_OPERATIONAL_VOLUME,target=/state",
+        '--mount',"type=bind,source=$PSScriptRoot/provision-mcp-state.sh,target=/provision-state.sh,readonly",'--entrypoint','sh',
+        'dev-orchestrator-mcp-read-only','/provision-state.sh') | Out-Null
     $started = $true
     Invoke-Docker ($compose + @('up','-d','--no-build','--wait','--wait-timeout','90','orchestrator')) 120 | Out-Null
     try { $response = Invoke-WebRequest "http://127.0.0.1:$LocalPort/readyz" -UseBasicParsing -TimeoutSec 5 }
