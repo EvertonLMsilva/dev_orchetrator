@@ -1,0 +1,2 @@
+# Shell scripts execute in Linux containers, including Windows bind mounts.
+*.sh text eol=lf
