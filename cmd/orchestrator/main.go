@@ -10,6 +10,8 @@ import (
 	"fmt"
 	"github.com/disgoorg/snowflake/v2"
 	"io"
+	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
 	"strings"
@@ -32,7 +34,17 @@ func run(ctx context.Context, args []string, output io.Writer) error {
 	tokenPath := flags.String("discord-token-file", "/run/secrets/discord_token", "provisioned Discord credential")
 	check := flags.Bool("check-config", false, "validate configuration without external connections")
 	register := flags.Bool("register-commands", false, "explicitly provision the read-only Discord command")
-	if flags.Parse(args) != nil || flags.NArg() != 0 || *path == "" || (*check && *register) {
+	health := flags.String("mcp-health", "", "check local MCP health/readiness without starting runtime")
+	if flags.Parse(args) != nil || flags.NArg() != 0 {
+		return composition.ErrConfig
+	}
+	if *health != "" {
+		if *path != "" || *check || *register {
+			return composition.ErrConfig
+		}
+		return mcpHealth(ctx, *health)
+	}
+	if *path == "" || (*check && *register) {
 		return composition.ErrConfig
 	}
 	config, e := composition.LoadConfig(*path)
@@ -43,14 +55,20 @@ func run(ctx context.Context, args []string, output io.Writer) error {
 		fmt.Fprintln(output, "READ_ONLY_CONFIG PASS")
 		return nil
 	}
-	token, e := readToken(*tokenPath)
-	if e != nil {
-		return e
+	if *register && config.DisableDiscord {
+		return composition.ErrConfig
 	}
-	gateway, e := discord.NewGateway(token)
-	token = ""
-	if e != nil {
-		return e
+	var gateway *discord.Gateway
+	if !config.DisableDiscord {
+		token, err := readToken(*tokenPath)
+		if err != nil {
+			return err
+		}
+		gateway, e = discord.NewGateway(token)
+		token = ""
+		if e != nil {
+			return e
+		}
 	}
 	if *register {
 		// Registration is a distinct, explicitly selected external operation.
@@ -69,30 +87,68 @@ func run(ctx context.Context, args []string, output io.Writer) error {
 	if e != nil {
 		return e
 	}
-	if e = gateway.SetConversationService(ctx, service); e != nil {
-		service.Shutdown(context.Background())
-		return e
+	if gateway != nil {
+		if e = gateway.SetConversationService(ctx, service); e == nil {
+			openCtx, cancelOpen := context.WithTimeout(ctx, time.Duration(config.RequestTimeout))
+			e = gateway.Open(openCtx)
+			cancelOpen()
+		}
 	}
-	openCtx, cancelOpen := context.WithTimeout(ctx, time.Duration(config.RequestTimeout))
-	e = gateway.Open(openCtx)
-	cancelOpen()
+	if e == nil && config.MCP != nil {
+		e = service.StartMCP()
+		if e == nil && !service.MCPReady() {
+			e = errors.New("MCP not ready")
+		}
+	}
 	if e == nil {
 		fmt.Fprintln(output, "READ_ONLY_SERVICE STARTED")
+		if config.MCP != nil {
+			fmt.Fprintln(output, "MCP_READ READY")
+		}
+		var gatewayFailed <-chan struct{}
+		if gateway != nil {
+			gatewayFailed = gateway.Failed()
+		}
 		select {
 		case <-ctx.Done():
-		case <-gateway.Failed():
+		case <-gatewayFailed:
 		case <-service.Failed():
 			e = errors.New("operational service failed")
 		}
 	}
 	shutdown, cancelShutdown := context.WithTimeout(context.Background(), time.Duration(config.ShutdownTimeout))
 	defer cancelShutdown()
-	gatewayErr := gateway.Close(shutdown)
+	var gatewayErr error
+	if gateway != nil {
+		gatewayErr = gateway.Close(shutdown)
+	}
 	serviceErr := service.Shutdown(shutdown)
 	if e != nil || gatewayErr != nil || serviceErr != nil {
 		return errors.New("service lifecycle failed")
 	}
 	fmt.Fprintln(output, "READ_ONLY_SHUTDOWN PASS")
+	return nil
+}
+
+func mcpHealth(ctx context.Context, endpoint string) error {
+	u, err := url.Parse(endpoint)
+	if err != nil || u.Scheme != "http" || u.User != nil || u.RawQuery != "" || u.Fragment != "" || (u.Hostname() != "127.0.0.1" && u.Hostname() != "::1" && u.Hostname() != "localhost") || (u.Path != "/readyz" && u.Path != "/healthz") {
+		return composition.ErrConfig
+	}
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return composition.ErrConfig
+	}
+	client := &http.Client{Timeout: 3 * time.Second, Transport: &http.Transport{}, CheckRedirect: func(*http.Request, []*http.Request) error { return errors.New("redirect denied") }}
+	defer client.CloseIdleConnections()
+	response, err := client.Do(request)
+	if err != nil {
+		return errors.New("MCP not ready")
+	}
+	defer response.Body.Close()
+	if response.StatusCode != 200 {
+		return errors.New("MCP not ready")
+	}
 	return nil
 }
 func readToken(path string) (string, error) {

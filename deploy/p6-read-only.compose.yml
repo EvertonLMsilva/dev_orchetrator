@@ -6,6 +6,7 @@ services:
     build:
       context: ..
       dockerfile: Dockerfile
+      target: validation
     read_only: true
     init: true
     restart: "no"

@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -68,5 +70,28 @@ func TestCredentialBounded(t *testing.T) {
 	}
 	if got, e := readToken(path); e != nil || got != "test-only" {
 		t.Fatal("credential reader failed")
+	}
+}
+
+func TestMCPHealthMode(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/readyz" {
+			w.WriteHeader(200)
+		} else {
+			w.WriteHeader(503)
+		}
+	}))
+	defer server.Close()
+	var output bytes.Buffer
+	if run(context.Background(), []string{"-mcp-health", server.URL + "/readyz"}, &output) != nil {
+		t.Fatal("healthy check failed")
+	}
+	for _, endpoint := range []string{server.URL + "/healthz", "https://example.invalid/readyz", server.URL + "/mcp"} {
+		if run(context.Background(), []string{"-mcp-health", endpoint}, &output) == nil {
+			t.Fatal("unsafe/unready health accepted")
+		}
+	}
+	if output.Len() != 0 {
+		t.Fatal("health detail leaked")
 	}
 }
