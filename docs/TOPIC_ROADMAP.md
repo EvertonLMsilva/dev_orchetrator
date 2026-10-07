@@ -193,3 +193,22 @@ e commit significativo. Uma capacidade por execução, sem refatoração lateral
 P6 inteiro = uma branch/PR; subdivisões históricas são rastreabilidade.
 Dependência operacional atual: P5 application DONE → P6.4 → P6.5 → P6.6;
 mediated WRITE/Git, P7–P9 ficam posteriores e dependem de refinamento do Planner.
+
+## P10 — estado atual após implementação no PR #7
+
+Este registro substitui a indicação histórica de mediated WRITE/Git como
+capacidade posterior acima, no escopo controlado de P10. P10 permanece
+IN_PROGRESS; não há declaração de LIVE-ready ou aceite final de P10.4.
+
+| Subtópico | Estado atual |
+| --- | --- |
+| P10.1 | CLOSED — PLANNER_REVIEW APPROVED |
+| P10.2 | CLOSED — PLANNER_REVIEW APPROVED |
+| P10.3 | CLOSED — PLANNER_REVIEW APPROVED |
+| P10.4 | IMPLEMENTED — PLANNER_REVIEW_PENDING |
+| P10.5 | NOT_STARTED |
+| P10.6 | NOT_STARTED |
+
+Evidências e blockers históricos: [P10](tasks/P10.md). O blocker de discovery
+de provisionamento/metadata Git foi superado pela implementação de P10.4;
+o aceite do Planner permanece pendente.
