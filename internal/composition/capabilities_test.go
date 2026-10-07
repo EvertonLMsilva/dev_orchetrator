@@ -6,9 +6,34 @@ import (
 	"dev-orchestrator/internal/domain"
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"testing"
+	"time"
 )
+
+func TestReadOnlyGitLegitimateMetadata(t *testing.T) {
+	for _, config := range []string{
+		"[core]\n symlinks = false\n",
+		"[branch \"codex/topic\"]\n vscode-merge-base = main\n",
+		"[core]\n symlinks = false\n[branch \"main\"]\n vscode-merge-base = origin/main\n",
+	} {
+		dir := t.TempDir()
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		cmd := exec.CommandContext(ctx, "git", "init", dir)
+		if err := cmd.Run(); err != nil {
+			cancel()
+			t.Fatal(err)
+		}
+		cancel()
+		if err := os.WriteFile(filepath.Join(dir, ".git", "config"), []byte("[core]\n repositoryformatversion = 0\n bare = false\n"+config), 0600); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := (readOnlyCapabilities{}).GitStatus(context.Background(), dir); err != nil {
+			t.Fatalf("legitimate config denied: %v", err)
+		}
+	}
+}
 
 func TestReadOnlyGitRejectsExecutableConfiguration(t *testing.T) {
 	for _, configuration := range []string{
@@ -17,6 +42,9 @@ func TestReadOnlyGitRejectsExecutableConfiguration(t *testing.T) {
 		"[core]\n fsmonitor = touch sentinel\n",
 		"[core]\n attributesFile = /outside/attributes\n",
 		"[extensions]\n worktreeConfig = true\n",
+		"[core]\n symlinks = false\n fsmonitor = touch sentinel\n",
+		"[branch \"main\"]\n vscode-merge-base-command = touch sentinel\n",
+		"[branch \"main\"]\n unknown = value\n",
 	} {
 		dir := t.TempDir()
 		metadata := filepath.Join(dir, ".git")

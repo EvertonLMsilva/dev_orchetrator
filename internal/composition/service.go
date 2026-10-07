@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	filestore "dev-orchestrator/internal/adapters/file"
+	inbound "dev-orchestrator/internal/adapters/mcp"
 	"dev-orchestrator/internal/adapters/memory"
 	"dev-orchestrator/internal/application"
 	"dev-orchestrator/internal/domain"
@@ -13,6 +14,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"net/http"
 	"strings"
 	"sync"
 	"time"
@@ -20,23 +22,27 @@ import (
 )
 
 type Service struct {
-	config    Config
-	routes    *application.ConfiguredProjectRoutes
-	projects  ports.ProjectRepository
-	tasks     *filestore.TaskRepository
-	builder   *application.ContextBuilder
-	planner   ports.Planner
-	agent     *application.LocalAgentTransport
-	audit     *auditStore
-	ctx       context.Context
-	cancel    context.CancelFunc
-	mu        sync.Mutex
-	active    bool
-	stopped   bool
-	done      chan struct{}
-	home      *provider.CodexRuntimeHome
-	isolation func(string) error
-	failed    chan struct{}
+	config     Config
+	routes     *application.ConfiguredProjectRoutes
+	projects   ports.ProjectRepository
+	tasks      *filestore.TaskRepository
+	builder    *application.ContextBuilder
+	planner    ports.Planner
+	agent      *application.LocalAgentTransport
+	localAgent *application.LocalAgentDispatcher
+	audit      *auditStore
+	ctx        context.Context
+	cancel     context.CancelFunc
+	mu         sync.Mutex
+	active     bool
+	stopped    bool
+	done       chan struct{}
+	home       *provider.CodexRuntimeHome
+	isolation  func(string) error
+	failed     chan struct{}
+	mcp        *inbound.Adapter
+	mcpServer  *http.Server
+	mcpAddress string
 }
 
 // NewService is the production composition: no caller-supplied Planner,
@@ -49,6 +55,9 @@ func NewService(ctx context.Context, c Config) (*Service, error) {
 		if e := requireReadOnly(p.Workspace); e != nil {
 			return nil, e
 		}
+	}
+	if c.DisableDiscord {
+		return buildService(ctx, c, nil, requireReadOnly)
 	}
 	home, e := provider.NewCodexRuntimeHome()
 	if e != nil {
@@ -66,7 +75,7 @@ func NewService(ctx context.Context, c Config) (*Service, error) {
 
 // Test injection is package-private; production always uses the constructor above.
 func buildService(parent context.Context, c Config, planner ports.Planner, isolation func(string) error) (*Service, error) {
-	if c.Validate() != nil || planner == nil || isolation == nil || parent.Err() != nil {
+	if c.Validate() != nil || (!c.DisableDiscord && planner == nil) || isolation == nil || parent.Err() != nil {
 		return nil, ErrConfig
 	}
 	for _, p := range c.Projects {
@@ -121,12 +130,24 @@ func buildService(parent context.Context, c Config, planner ports.Planner, isola
 	}
 	routes, _ := application.NewConfiguredProjectRoutes(c.Routes)
 	ctx, cancel := context.WithCancel(parent)
-	return &Service{config: c, routes: routes, projects: projects, tasks: tasks, builder: application.NewContextBuilder(projects, tasks), planner: application.NewReadOnlyPlanner(planner), agent: application.NewLocalAgentTransport(application.NewLocalAgent(projects, nil, application.NewReadOnlyActionAllowlist(), readOnlyCapabilities{})), audit: audit, ctx: ctx, cancel: cancel, isolation: isolation, failed: make(chan struct{})}, nil
+	localAgent := application.NewLocalAgent(projects, nil, application.NewReadOnlyActionAllowlist(), readOnlyCapabilities{})
+	s := &Service{config: c, routes: routes, projects: projects, tasks: tasks, builder: application.NewContextBuilder(projects, tasks), planner: application.NewReadOnlyPlanner(planner), agent: application.NewLocalAgentTransport(localAgent), localAgent: localAgent, audit: audit, ctx: ctx, cancel: cancel, isolation: isolation, failed: make(chan struct{})}
+	if c.MCP != nil {
+		if err := s.composeMCP(isolation); err != nil {
+			cancel()
+			audit.close()
+			return nil, err
+		}
+	}
+	return s, nil
 }
 func rejected() application.ConversationResponse {
 	return application.ConversationResponse{Status: "REJECTED", Message: "Não foi possível processar a solicitação."}
 }
 func (s *Service) Handle(parent context.Context, input application.ConversationInput) application.ConversationResponse {
+	if s.config.DisableDiscord {
+		return rejected()
+	}
 	if len(input.Text) > s.config.MaxIntentBytes || strings.TrimSpace(input.Text) == "" || !utf8.ValidString(input.Text) || parent.Err() != nil {
 		return rejected()
 	}
@@ -198,6 +219,9 @@ func (s *Service) failClosed() {
 	}
 	s.mu.Unlock()
 	s.cancel()
+	if s.mcp != nil {
+		s.mcp.Stop()
+	}
 }
 func (s *Service) Failed() <-chan struct{} { return s.failed }
 func (s *Service) Shutdown(ctx context.Context) error {
@@ -205,8 +229,18 @@ func (s *Service) Shutdown(ctx context.Context) error {
 	s.stopped = true
 	done := s.done
 	active := s.active
+	mcpServer := s.mcpServer
 	s.mu.Unlock()
 	s.cancel()
+	if s.mcp != nil {
+		s.mcp.Stop()
+	}
+	if mcpServer != nil {
+		if err := mcpServer.Shutdown(ctx); err != nil {
+			mcpServer.Close()
+			return err
+		}
+	}
 	if active {
 		select {
 		case <-done:

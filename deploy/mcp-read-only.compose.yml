@@ -1,0 +1,51 @@
+# One Dev Orchestrator process; security/application/adapters remain in-process.
+# Preprovision root-owned private security/state directories. No provider auth or
+# Docker daemon socket is needed for MCP READ alone. No secrets baked into image.
+services:
+  orchestrator:
+    image: ${MCP_RUNTIME_IMAGE:-dev-orchestrator-mcp-read-only}
+    build:
+      context: ..
+      dockerfile: Dockerfile
+      target: runtime
+    command: ["-config", "/run/config/orchestrator.json"]
+    read_only: true
+    init: true
+    restart: "no"
+    stop_grace_period: 120s
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    ports:
+      - "127.0.0.1:${MCP_LOCAL_PORT:-8080}:8080"
+    tmpfs:
+      - /tmp:rw,nosuid,nodev,size=64m
+    volumes:
+      - type: bind
+        source: ${MCP_CONFIG_FILE:?explicit configuration required}
+        target: /run/config/orchestrator.json
+        read_only: true
+        bind: {create_host_path: false}
+      - type: volume
+        source: security
+        target: /run/mcp/security
+        read_only: true
+      - type: bind
+        source: ${MCP_PROJECT_WORKSPACE:?controlled project workspace required}
+        target: /projects/p
+        read_only: true
+        bind: {create_host_path: false}
+      - type: volume
+        source: operational
+        target: /var/lib/dev-orchestrator
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/orchestrator", "-mcp-health", "http://127.0.0.1:8080/readyz"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+volumes:
+  security:
+    external: true
+    name: ${MCP_SECURITY_VOLUME:-dev-orchestrator-mcp-security}
+  operational:
+    external: true
+    name: ${MCP_OPERATIONAL_VOLUME:-dev-orchestrator-mcp-state}
