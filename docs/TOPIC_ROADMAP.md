@@ -50,7 +50,8 @@ adicional; o blocker antigo de discovery Git não é reaberto.
 
 ### MVP-2 — Ciclo LIVE de desenvolvimento em um piloto controlado
 
-Estado: MVP_GATE — implementação integrada em validação; E2E LIVE pendente.
+Estado: MVP_GATE — IMPLEMENTATION_COMPLETE; LOCAL_VALIDATION_COMPLETE;
+LIVE_E2E_PENDING. MVP permanece PENDING.
 Dependências: MVP-1 aceito; P5/P6 e P10.1–P10.3 preservados; task refinada e
 autorização explícita do Planner antes de implementação/ensaio LIVE. Provider
 CandidateGenerator concreto tool-free, configuração trusted de actor/grants e
