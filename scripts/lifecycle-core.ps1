@@ -18,7 +18,9 @@ function Stop-LifecycleComponents($State, $Adapter) {
     $failed = $false
     foreach ($component in 'Tunnel','Development','MCP') {
         try {
-            if (& $Adapter.Owned $State $component) { & $Adapter.Stop $State $component }
+            # Docker cleanup must also inspect stopped resources. Its adapter
+            # verifies ownership before every mutation; Tunnel keeps its gate.
+            if ($component -ne 'Tunnel' -or (& $Adapter.Owned $State $component)) { & $Adapter.Stop $State $component }
         } catch { $failed = $true }
     }
     if ($failed) { throw 'Lifecycle shutdown incomplete' }
