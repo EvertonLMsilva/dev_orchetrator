@@ -5,6 +5,7 @@ import (
 	"dev-orchestrator/internal/domain"
 	"dev-orchestrator/internal/ports"
 	"encoding/json"
+	"errors"
 	"sync"
 	"time"
 )
@@ -20,6 +21,8 @@ type DevelopmentEffects interface {
 }
 type DevelopmentGitResult struct{ State, OID, Tree string }
 type DevelopmentResult struct {
+	PlannerFailureStage                                                                           string `json:",omitempty"`
+	BlockPersistenceFailed                                                                        bool   `json:",omitempty"`
 	ProjectID                                                                                     domain.ProjectID
 	TaskID                                                                                        domain.TaskID
 	CorrelationID, ApproverIdentity, CandidateIdentity, WriteTransaction, Branch, CommitOID, Tree string
@@ -101,12 +104,19 @@ func (s *DevelopmentCycle) transition(ctx context.Context, state domain.TaskStat
 	}
 	return err
 }
-func (s *DevelopmentCycle) block(ctx context.Context) {
+
+var ErrBlockPersistence = errors.New("BLOCK_PERSISTENCE")
+
+func (s *DevelopmentCycle) block(ctx context.Context) error {
 	s.pending = nil
 	s.terminal = true
 	cleanup, cancel := context.WithTimeout(context.WithoutCancel(ctx), time.Second)
 	defer cancel()
-	s.transition(cleanup, domain.TaskStatusBlocked)
+	if s.transition(cleanup, domain.TaskStatusBlocked) != nil {
+		s.result.BlockPersistenceFailed = true
+		return ErrBlockPersistence
+	}
+	return nil
 }
 func (s *DevelopmentCycle) Begin(ctx context.Context, e ports.ActorEvidence, intent string) (DevelopmentOutput, error) {
 	s.mu.Lock()
@@ -132,8 +142,18 @@ func (s *DevelopmentCycle) Begin(ctx context.Context, e ports.ActorEvidence, int
 	plan, err := s.planner.Run(ctx, req)
 	d := plan.Decision
 	if err != nil || ctx.Err() != nil || d.Validate() != nil || d.ProjectID != task.ProjectID || d.TaskID != task.ID {
-		s.block(ctx)
-		return s.output(), domain.ErrWriteDenied
+		stage := "PLANNER"
+		var failure *ports.PlannerFailure
+		if errors.As(err, &failure) {
+			stage = failure.FailureStage()
+		} else if errors.Is(err, context.DeadlineExceeded) || errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			stage = "TIMEOUT"
+		} else if errors.Is(err, context.Canceled) || errors.Is(ctx.Err(), context.Canceled) {
+			stage = "CANCELLED"
+		}
+		s.result.PlannerFailureStage = stage
+		blockErr := s.block(ctx)
+		return s.output(), errors.Join(domain.ErrWriteDenied, ports.NewPlannerFailure(stage, err), blockErr)
 	}
 	if d.Type != ports.PlannerDecisionPrepareExecutor {
 		s.block(ctx)
@@ -263,6 +283,6 @@ func (s *DevelopmentCycle) Cancel(ctx context.Context, e ports.ActorEvidence) (D
 	if s.terminal {
 		return s.output(), domain.ErrWriteDenied
 	}
-	s.block(ctx)
-	return s.output(), nil
+	err := s.block(ctx)
+	return s.output(), err
 }

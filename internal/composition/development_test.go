@@ -10,6 +10,8 @@ import (
 	"dev-orchestrator/internal/ports"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -18,14 +20,111 @@ import (
 	"time"
 )
 
-type developmentPlanner struct{ block bool }
+type developmentPlanner struct {
+	block bool
+	fail  func() error
+}
 
 func (p developmentPlanner) Plan(_ context.Context, q ports.PlannerRequest) (ports.PlannerDecision, error) {
+	if p.fail != nil {
+		return ports.PlannerDecision{}, p.fail()
+	}
 	kind := ports.PlannerDecisionPrepareExecutor
 	if p.block {
 		kind = ports.PlannerDecisionBlock
 	}
 	return ports.PlannerDecision{ProjectID: q.ProjectID, TaskID: q.TaskID, Type: kind, Reason: "controlled pilot"}, nil
+}
+
+func TestDevelopmentPlannerFailureAndBlockPersistence(t *testing.T) {
+	for _, brokenStore := range []bool{false, true} {
+		t.Run(fmt.Sprint(brokenStore), func(t *testing.T) {
+			var service *DevelopmentService
+			p := developmentPlanner{fail: func() error {
+				if brokenStore {
+					if err := os.Rename(filepath.Join(service.config.StateRoot, "tasks.json"), filepath.Join(service.config.StateRoot, "tasks.saved")); err != nil {
+						t.Fatal(err)
+					}
+					if err := os.Mkdir(filepath.Join(service.config.StateRoot, "tasks.json"), 0700); err != nil {
+						t.Fatal(err)
+					}
+				}
+				return errors.New("SECRET_PLANNER")
+			}}
+			service, _, _, file, e := developmentFixture(t, []string{"WRITE_APPLY"}, p, developmentGenerator{})
+			out, err := service.Begin(context.Background(), e, "create note.txt")
+			if err == nil || out.Review != nil || strings.Contains(err.Error(), "SECRET") {
+				t.Fatal("unsafe failure", err)
+			}
+			data, _ := json.Marshal(out.Result)
+			if !strings.Contains(string(data), "PLANNER") {
+				t.Fatal("planner stage lost", string(data))
+			}
+			if brokenStore {
+				if !strings.Contains(err.Error(), "BLOCK_PERSISTENCE") {
+					t.Fatal("block persistence lost", err)
+				}
+			} else {
+				if out.Result.TaskState != domain.TaskStatusBlocked {
+					t.Fatal("not blocked", out)
+				}
+				stored, _ := os.ReadFile(filepath.Join(service.config.StateRoot, "tasks.json"))
+				if !strings.Contains(string(stored), "BLOCKED") {
+					t.Fatal("block not persisted")
+				}
+			}
+			if _, err := os.Stat(file); !os.IsNotExist(err) {
+				t.Fatal("effect after planner failure")
+			}
+			if _, err := service.Begin(context.Background(), e, "retry"); err == nil {
+				t.Fatal("automatic retry")
+			}
+		})
+	}
+}
+
+func TestDevelopmentPrePlannerDenialEvidence(t *testing.T) {
+	service, _, _, _, e := developmentFixture(t, nil, developmentPlanner{fail: func() error { t.Fatal("pre-gate reached planner"); return nil }}, developmentGenerator{})
+	for _, stage := range []string{"REQUEST_ROUTE", "REQUEST_ACTION", "SERVICE_STOPPED"} {
+		in := application.ConversationInput{Source: service.config.Route, Actor: e, DevelopmentAction: "begin", Text: "create note.txt"}
+		if stage == "REQUEST_ROUTE" {
+			in.Source.ChannelID = "other"
+		} else if stage == "REQUEST_ACTION" {
+			in.DevelopmentAction = "invalid"
+		} else {
+			service.stopped = true
+		}
+		response := service.Handle(context.Background(), in)
+		if response.Status != "REJECTED" || !strings.Contains(response.Message, stage) || !strings.Contains(response.Message, "corr") {
+			t.Fatal("pre-gate diagnostic lost", response)
+		}
+		stored, _ := os.ReadFile(filepath.Join(service.config.StateRoot, "tasks.json"))
+		if !strings.Contains(string(stored), "ANALYZING") {
+			t.Fatal("pre-gate mutated task")
+		}
+		in.Actor.ExternalID = "unknown"
+		if strings.Contains(service.Handle(context.Background(), in).Message, stage) {
+			t.Fatal("unknown actor disclosure")
+		}
+	}
+}
+
+func TestDevelopmentPlannerFailureChannelEvidence(t *testing.T) {
+	service, _, _, _, e := developmentFixture(t, nil, developmentPlanner{fail: func() error { return ports.NewPlannerFailure("HOST_START", errors.New("SECRET_DOCKER")) }}, developmentGenerator{})
+	in := application.ConversationInput{Source: service.config.Route, Actor: e, DevelopmentAction: "begin", Text: "create note.txt"}
+	response := service.Handle(context.Background(), in)
+	if response.Status != "REJECTED" || !strings.Contains(response.Message, "HOST_START") || !strings.Contains(response.Message, "corr") || strings.Contains(response.Message, "SECRET") {
+		t.Fatal("unsafe or missing evidence", response)
+	}
+	var out application.DevelopmentOutput
+	data, err := os.ReadFile(filepath.Join(service.config.StateRoot, "development.json"))
+	if err != nil || json.Unmarshal(data, &out) != nil || out.Result.PlannerFailureStage != "HOST_START" || out.Result.TaskState != domain.TaskStatusBlocked {
+		t.Fatal("missing persisted failure evidence", err)
+	}
+	in.Actor.ExternalID = "unknown"
+	if strings.Contains(service.Handle(context.Background(), in).Message, "HOST_START") {
+		t.Fatal("unknown actor diagnostic disclosure")
+	}
 }
 
 type developmentGenerator struct{ fail, wait bool }

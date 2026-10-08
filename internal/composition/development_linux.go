@@ -205,8 +205,11 @@ func (s *DevelopmentService) Verify(ctx context.Context, r application.Developme
 func (s *DevelopmentService) Handle(ctx context.Context, input application.ConversationInput) application.ConversationResponse {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.stopped || input.Source != s.config.Route {
-		return application.ConversationResponse{Status: "REJECTED", Message: "Solicitação negada."}
+	if s.stopped {
+		return s.denied(ctx, input.Actor, "SERVICE_STOPPED")
+	}
+	if input.Source != s.config.Route {
+		return s.denied(ctx, input.Actor, "REQUEST_ROUTE")
 	}
 	var out application.DevelopmentOutput
 	var err error
@@ -218,12 +221,12 @@ func (s *DevelopmentService) Handle(ctx context.Context, input application.Conve
 	case "cancel":
 		out, err = s.Cancel(ctx, input.Actor)
 	default:
-		return application.ConversationResponse{Status: "REJECTED", Message: "Solicitação negada."}
+		return s.denied(ctx, input.Actor, "REQUEST_ACTION")
 	}
 	if err != nil {
 		// Authenticated actors receive trusted partial receipts after a failed
 		// gate. Unknown identities receive no candidate / result disclosure.
-		if _, authErr := s.auth.AuthenticateActor(context.WithoutCancel(ctx), input.Actor); authErr == nil && (out.Result.CandidateIdentity != "" || out.Result.TaskState == domain.TaskStatusBlocked) {
+		if _, authErr := s.auth.AuthenticateActor(context.WithoutCancel(ctx), input.Actor); authErr == nil && (out.Result.CandidateIdentity != "" || out.Result.TaskState == domain.TaskStatusBlocked || out.Result.PlannerFailureStage != "") {
 			if out.Result.TaskState == domain.TaskStatusBlocked && out.Review == nil {
 				if persistErr := s.persistOutput(out); persistErr != nil {
 					s.stopped = true
@@ -250,6 +253,13 @@ func (s *DevelopmentService) Handle(ctx context.Context, input application.Conve
 	}
 	data, _ := json.Marshal(out.Result)
 	return application.ConversationResponse{Status: string(out.Result.TaskState), Message: fmt.Sprintf("Resultado verificado: %s", data)}
+}
+func (s *DevelopmentService) denied(ctx context.Context, actor ports.ActorEvidence, stage string) application.ConversationResponse {
+	message := "Solicitação negada."
+	if _, err := s.auth.AuthenticateActor(context.WithoutCancel(ctx), actor); err == nil {
+		message += " Estágio: " + stage + ". Referência: " + s.config.CorrelationID
+	}
+	return application.ConversationResponse{Status: "REJECTED", Message: message}
 }
 func (s *DevelopmentService) persistOutput(out application.DevelopmentOutput) error {
 	if s.lease == nil || s.lease.root == nil {

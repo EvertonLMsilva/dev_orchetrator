@@ -13,6 +13,24 @@ import (
 
 type plannerRuntimeStub func(context.Context, PlannerRuntimeRequest) (PlannerRuntimeResult, error)
 
+func TestCodexPlannerAdapterPreservesSafeFailure(t *testing.T) {
+	for _, stage := range []string{"NEW_CONTAINER", "MATERIALIZE", "PREPARE", "HOST_START", "INFER", "TIMEOUT", "CLEANUP"} {
+		t.Run(stage, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			adapter := NewCodexPlannerAdapter(plannerRuntimeStub(func(context.Context, PlannerRuntimeRequest) (PlannerRuntimeResult, error) {
+				cancel()
+				return PlannerRuntimeResult{}, errors.Join(errors.New("SECRET_PROVIDER"), ports.NewPlannerFailure(stage, context.Canceled))
+			}))
+			_, err := adapter.Plan(ctx, plannerAdapterRequest())
+			var f *ports.PlannerFailure
+			if !errors.As(err, &f) || f.FailureStage() != stage || strings.Contains(err.Error(), "SECRET") || !errors.Is(err, context.Canceled) {
+				t.Fatal("failure overwritten or leaked", err)
+			}
+		})
+	}
+}
+
 func (f plannerRuntimeStub) Plan(ctx context.Context, r PlannerRuntimeRequest) (PlannerRuntimeResult, error) {
 	return f(ctx, r)
 }
