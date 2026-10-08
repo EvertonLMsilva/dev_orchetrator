@@ -68,6 +68,10 @@ func (a *CodexPlannerAdapter) Plan(ctx context.Context, request ports.PlannerReq
 	bounded, cancel := context.WithTimeout(ctx, plannerTimeout)
 	defer cancel()
 	result, err := a.runtime.Plan(bounded, runtimeRequest)
+	var failure *ports.PlannerFailure
+	if errors.As(err, &failure) {
+		return ports.PlannerDecision{}, errors.Join(ErrPlannerRuntimeFailure, ports.NewPlannerFailure(failure.FailureStage(), failure))
+	}
 	if bounded.Err() != nil {
 		return ports.PlannerDecision{}, bounded.Err()
 	}

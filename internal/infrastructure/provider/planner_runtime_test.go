@@ -16,6 +16,66 @@ type plannerMemoryContainer struct {
 	inferenceCalls int
 }
 
+type hostStartFailureContainer struct{ plannerMemoryContainer }
+
+func (*hostStartFailureContainer) Infer(context.Context, infrastructure.PlannerRuntimeRequest) (infrastructure.PlannerRuntimeResult, error) {
+	return infrastructure.PlannerRuntimeResult{}, errors.New("SECRET_HOST")
+}
+func (*hostStartFailureContainer) SanitizedFailureClass() string { return "host_start_failure" }
+
+func TestPlannerFailureStages(t *testing.T) {
+	for _, stage := range []string{"NEW_CONTAINER", "MATERIALIZE", "PREPARE", "HOST_START", "INFER", "TIMEOUT", "CANCELLED", "CLEANUP"} {
+		t.Run(stage, func(t *testing.T) {
+			store := testRuntimeStore(t)
+			if stage != "MATERIALIZE" {
+				if err := store.StoreSession(context.Background(), []byte(runtimeAuth)); err != nil {
+					t.Fatal(err)
+				}
+			}
+			c := &plannerMemoryContainer{}
+			var container plannerContainer = c
+			switch stage {
+			case "PREPARE":
+				c.fail = "prepare"
+			case "HOST_START":
+				container = &hostStartFailureContainer{}
+			case "INFER":
+				c.mode = "runtime"
+			case "TIMEOUT", "CANCELLED":
+				c.mode = "wait"
+			case "CLEANUP":
+				c.fail = "destroy"
+			}
+			r := &ToolFreeCodexPlannerRuntime{home: store, newContainer: func() (plannerContainer, error) {
+				if stage == "NEW_CONTAINER" {
+					return nil, errors.New("SECRET_DOCKER")
+				}
+				return container, nil
+			}}
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			q := plannerRequest()
+			q.Limits.Timeout = 20 * time.Millisecond
+			if stage == "CANCELLED" {
+				time.AfterFunc(5*time.Millisecond, cancel)
+			}
+			out, err := r.Plan(ctx, q)
+			var failure interface{ FailureStage() string }
+			if err == nil || !errors.As(err, &failure) || failure.FailureStage() != stage {
+				t.Fatalf("stage %s lost: %v", stage, err)
+			}
+			if strings.Contains(err.Error(), "SECRET") || len(out.StructuredOutput) != 0 {
+				t.Fatal("unsafe failure output")
+			}
+			if stage == "CLEANUP" {
+				if err := store.acquire(context.Background()); !errors.Is(err, ErrRuntimeAuthBusy) {
+					t.Fatal("cleanup released exclusion", err)
+				}
+			}
+		})
+	}
+}
+
 func (c *plannerMemoryContainer) Infer(ctx context.Context, _ infrastructure.PlannerRuntimeRequest) (infrastructure.PlannerRuntimeResult, error) {
 	c.inferenceCalls++
 	if c.mode == "wait" {
