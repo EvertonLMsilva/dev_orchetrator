@@ -6,10 +6,36 @@ import (
 	"context"
 	"dev-orchestrator/internal/composition"
 	"encoding/json"
+	"net/http"
 	"os"
 	"path/filepath"
 	"testing"
 )
+
+func TestReadinessIsLoopbackObservationalAndCloses(t *testing.T) {
+	for _, address := range []string{"0.0.0.0:0", "localhost:0", "[::]:0"} {
+		if _, _, err := developmentReadiness(address); err == nil {
+			t.Fatal("unsafe listener accepted")
+		}
+	}
+	address, close, err := developmentReadiness("127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer close()
+	response, err := http.Get("http://" + address + "/readyz")
+	if err != nil {
+		t.Fatal(err)
+	}
+	response.Body.Close()
+	if response.StatusCode != 200 {
+		t.Fatal(response.StatusCode)
+	}
+	close()
+	if _, err := http.Get("http://" + address + "/readyz"); err == nil {
+		t.Fatal("readiness survived shutdown")
+	}
+}
 
 func TestOfflineConfigModesRequireNoCredentialsOrEffects(t *testing.T) {
 	for _, operational := range []bool{false, true} {

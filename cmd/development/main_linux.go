@@ -12,6 +12,8 @@ import (
 	"fmt"
 	"github.com/disgoorg/snowflake/v2"
 	"io"
+	"net"
+	"net/http"
 	"os"
 	"os/signal"
 	"strings"
@@ -20,6 +22,30 @@ import (
 )
 
 type registrationOnly struct{}
+
+// Started only after the gateway and operational composition are ready.
+// This listener has no domain callbacks or authority.
+func developmentReadiness(address string) (string, func(), error) {
+	host, _, err := net.SplitHostPort(address)
+	if err != nil || host != "127.0.0.1" {
+		return "", nil, errors.New("invalid readiness address")
+	}
+	listener, err := net.Listen("tcp4", address)
+	if err != nil {
+		return "", nil, errors.New("readiness unavailable")
+	}
+	mux := http.NewServeMux()
+	mux.HandleFunc("/readyz", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	})
+	server := &http.Server{Handler: mux, ReadHeaderTimeout: time.Second, WriteTimeout: time.Second, IdleTimeout: time.Second, MaxHeaderBytes: 4096}
+	go func() { _ = server.Serve(listener) }()
+	return listener.Addr().String(), func() { _ = server.Close() }, nil
+}
 
 func (registrationOnly) Handle(context.Context, application.ConversationInput) application.ConversationResponse {
 	return application.ConversationResponse{Status: "REJECTED", Message: "Solicitação negada."}
@@ -40,6 +66,7 @@ func run(ctx context.Context, args []string) (result error) {
 	register := flags.String("register-commands", "", "explicit Discord application ID registration")
 	check := flags.Bool("check-config", false, "offline validation")
 	operational := flags.Bool("operational", false, "trusted multi-project configuration")
+	readyAddress := flags.String("ready-listen", "", "optional loopback readiness listener")
 	if flags.Parse(args) != nil || flags.NArg() != 0 || *configPath == "" {
 		return errors.New("invalid pilot configuration")
 	}
@@ -53,6 +80,12 @@ func run(ctx context.Context, args []string) (result error) {
 	}
 	if err != nil {
 		return err
+	}
+	if *readyAddress != "" {
+		host, _, e := net.SplitHostPort(*readyAddress)
+		if e != nil || host != "127.0.0.1" {
+			return errors.New("invalid readiness address")
+		}
 	}
 	if *check {
 		fmt.Println("DEVELOPMENT_CONFIG PASS")
@@ -124,6 +157,13 @@ func run(ctx context.Context, args []string) (result error) {
 		return err
 	}
 	fmt.Println("DEVELOPMENT READY explicit confirmations required")
+	if *readyAddress != "" {
+		_, close, err := developmentReadiness(*readyAddress)
+		if err != nil {
+			return err
+		}
+		defer close()
+	}
 	select {
 	case <-ctx.Done():
 	case <-g.Failed():
