@@ -272,6 +272,44 @@ func operationalRecord(t *testing.T, s *OperationalDevelopmentService, project d
 	t.Fatal("missing record")
 	return operationalCycleRecord{}
 }
+func TestOperationalUnknownGrantProjectRejectedBeforeEffects(t *testing.T) {
+	c := operationalFixture(t)
+	for i, id := range []domain.ProjectID{"alpha", "beta"} {
+		c.Registry.Projects[i].ID = id
+		c.Registry.Routes[i].ProjectID = id
+		for j := range 3 {
+			c.Grants[i*3+j].ProjectID = string(id)
+		}
+	}
+	if err := c.Validate(); err != nil {
+		t.Fatal("valid alpha/beta registry:", err)
+	}
+	c.Grants = append(c.Grants, ports.Grant{PrincipalID: "operator", ProjectID: "unknown", Operation: "WRITE_APPLY"})
+	if _, err := infrastructure.NewActorAuthority(c.Mappings, c.Grants); err != nil {
+		t.Fatal("valid Principal and Grant rejected by ActorAuthority:", err)
+	}
+	if err := c.Validate(); !errors.Is(err, ErrConfig) {
+		t.Error("Validate must reject unknown Grant project:", err)
+	}
+	s, err := NewOperationalDevelopmentService(context.Background(), c)
+	if s != nil {
+		s.Shutdown(context.Background())
+		t.Error("service created for unknown Grant project")
+	}
+	if !errors.Is(err, ErrConfig) {
+		t.Error("constructor must reject unknown Grant project:", err)
+	}
+	for _, path := range []string{c.Registry.StateDir, c.ScratchRoot, c.Registry.Projects[0].Workspace, c.Registry.Projects[1].Workspace} {
+		entries, err := os.ReadDir(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(entries) != 0 {
+			t.Errorf("effect before validation in %s: %v", path, entries)
+		}
+	}
+}
+
 func TestOperationalRegistryValidationBeforeEffects(t *testing.T) {
 	c := operationalFixture(t)
 	if c.Validate() != nil {
