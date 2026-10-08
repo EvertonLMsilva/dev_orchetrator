@@ -2,15 +2,18 @@
 
 ## MVP — estado vigente
 
-Reconciliação documental em 2026-10-07, conforme aceites do Planner e registros
+Fechamento documental em 2026-10-08, conforme aceites do Planner e registros
 [P5](tasks/P5.md), [P6](tasks/P6.md), [P10](tasks/P10.md) e [MCP](tasks/MCP.md).
 Esta seção é canônica; os blocos HISTÓRICO/SUPERSEDED abaixo preservam evidência
 e não reabrem entregas aceitas nem concedem autorização para novas execuções.
 
-MVP funcional ainda não aceito: falta provar uma tarefa de desenvolvimento em
-UM projeto piloto pelo ciclo Usuário/Channel → Orchestrator → Planner → task
-controlada → Executor → alteração mediada → Git local controlado → evidência/
-resultado → usuário/Channel. O E2E P6.6 é READ-ONLY; MCP READ não executa esse ciclo.
+MVP: DONE — PLANNER_REVIEW APPROVED. MVP-1: DONE. MVP-2: DONE.
+O LIVE #3 comprovou o ciclo mínimo Discord → rota/ator autenticado → Planner
+real → CandidateGenerator tool-free → revisão humana e WRITE mediado → revisões
+humanas de branch e commit locais → verificação → TaskState DONE → Channel.
+O MVP termina no commit Git local controlado. A evidência oficial correlacionada
+e o aceite do Planner estão em [P10](tasks/P10.md#aceitação-oficial--mvp-2-live-3).
+O E2E P6.6 e MCP permanecem READ-ONLY.
 
 | Capacidade | Classificação | Evidência ou gate vigente |
 | --- | --- | --- |
@@ -20,10 +23,10 @@ resultado → usuário/Channel. O E2E P6.6 é READ-ONLY; MCP READ não executa e
 | MCP READ operacional | DONE | MCP-7 DONE — aprovado pelo Planner; EXTERNAL_E2E=PASS. Review isolado MCP-5 permanece conforme seu registro, sem novo aceite inferido. |
 | P10.1–P10.3: candidato, autorização e aplicação mediada recuperável | DONE | CLOSED — PLANNER_REVIEW APPROVED; prova determinística, sem provider concreto/LIVE ou composição produtiva aceitos. |
 | P10.4: aceite do Git local controlado | DONE | CLOSED — PLANNER_REVIEW APPROVED em 2026-10-07; Git local aceito. |
-| Ciclo de desenvolvimento LIVE integrado e seguro | MVP_GATE | MVP-2 implementa provider concreto, ator/grants/issuance e composição com confirmações separadas; validação/evidência em P10. E2E LIVE continua pendente. |
+| Ciclo de desenvolvimento LIVE integrado e seguro | DONE | MVP-2 LIVE #3 E2E PASS — PLANNER_REVIEW APPROVED; três gates independentes, persistência e artefato/Git local verificados. Evidência em P10. |
 | Executor LIVE pelo adapter legado P4 | BLOCKED | B-P4-001 OPEN nesse caminho; não declarado resolvido por P6 ou por implementação P10. |
 | MCP-8, P10.5/P10.6 e P7–P9 | POST_MVP | Não indispensáveis ao primeiro ciclo local; não iniciados por esta reconciliação. |
-| TD-P4-001 e histórico B-P4-001 para o caminho legado | DEBT_NON_BLOCKING | Continuam abertos no escopo legado; não bloqueiam automaticamente MODEL_D. A prova LIVE de MODEL_D continua sendo MVP_GATE. |
+| TD-P4-001 e histórico B-P4-001 para o caminho legado | DEBT_NON_BLOCKING | Continuam abertos no escopo legado; não reabrem o MVP aceito pelo caminho MODEL_D. |
 
 Invariantes do MVP: autorização explícita por ator autenticado/autorizado,
 fail-closed, workspace confinado e single-writer, WRITE mediado, gates Git
@@ -32,9 +35,9 @@ escalation. Channel não emite autoridade; nem ALLOW textual, provider DONE ou
 WRITE simbólico autorizam efeitos. Executor não recebe workspace real/.git;
 MODEL_D produz proposta estrita sem ferramentas, aplicada por componentes trusted.
 
-## Caminho mínimo restante para MVP
+## Entregas mínimas concluídas do MVP
 
-MVP_REMAINING_DELIVERIES: 1
+MVP_REMAINING_DELIVERIES: 0
 
 ### MVP-1 — Aceite do Git local controlado existente
 
@@ -50,8 +53,22 @@ adicional; o blocker antigo de discovery Git não é reaberto.
 
 ### MVP-2 — Ciclo LIVE de desenvolvimento em um piloto controlado
 
-Estado: MVP_GATE — IMPLEMENTATION_COMPLETE; LOCAL_VALIDATION_COMPLETE;
-LIVE_E2E_PENDING. MVP permanece PENDING.
+Estado: DONE — IMPLEMENTATION_COMPLETE; LOCAL_VALIDATION_COMPLETE;
+LIVE_E2E_PASS — PLANNER_REVIEW APPROVED. MVP: DONE.
+LIVE #3: ProjectID `mvp2-live-pilot`, TaskID `mvp2-live-task`, CorrelationID
+`2123456789abcdef2123456789abcdef`, ApproverIdentity `pilot-operator`.
+WRITE APPLIED; branch `codex/mvp2-live-pilot`; commit
+`ec9c44808a1891ffa332ee31dcdc7717e9443293`; artefato `note.txt` com conteúdo
+exato `MVP-2 LIVE PASS.`; TaskState DONE persistido. Shutdown limpo, container
+removido após Ctrl+C e volumes preservados, conforme evidência aceita pelo Planner.
+Os gates WRITE_APPLY, GIT_BRANCH e GIT_COMMIT tiveram confirmações humanas
+independentes; não houve autoridade de WRITE/push fornecida ao modelo, PR ou
+merge automáticos. O fail-closed de rota foi comprovado em tentativa anterior.
+
+#### Plano de aceite — HISTÓRICO/SUPERSEDED pelo LIVE #3
+
+O planejamento abaixo preserva as decisões anteriores; seus estados pendentes
+foram superados pelo aceite acima e não representam entregas restantes do MVP.
 Dependências: MVP-1 aceito; P5/P6 e P10.1–P10.3 preservados; task refinada e
 autorização explícita do Planner antes de implementação/ensaio LIVE. Provider
 CandidateGenerator concreto tool-free, configuração trusted de actor/grants e
@@ -299,7 +316,10 @@ P6 inteiro = uma branch/PR; subdivisões históricas são rastreabilidade.
 Dependência operacional histórica já satisfeita: P5 application DONE → P6.4 → P6.5 → P6.6;
 mediated WRITE/Git, P7–P9 ficam posteriores e dependem de refinamento do Planner.
 
-## P10 — estado atual após implementação no PR #7
+## P10 — estado após implementação no PR #7 — HISTÓRICO/SUPERSEDED
+
+Registro preservado; estados vigentes e aceites posteriores estão no quadro MVP
+acima e em P10.md. As pendências abaixo não reabrem o MVP concluído.
 
 Este registro substitui a indicação histórica de mediated WRITE/Git como
 capacidade posterior acima, no escopo controlado de P10. P10 permanece
