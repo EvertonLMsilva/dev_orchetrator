@@ -1,0 +1,11 @@
+{
+  "MCPConfig": "D:\\04-Projetos\\25-dev_orchestrator\\.runtime\\mcp-real\\orchestrator.json",
+  "Workspace": "D:\\04-Projetos\\25-dev_orchestrator",
+  "SecuritySource": "D:\\04-Projetos\\25-dev_orchestrator\\.runtime\\mcp-real\\security",
+  "LocalPort": 8080,
+  "TunnelExecutable": "D:\\04-Projetos\\25-dev_orchestrator\\tunnel-client\\tunnel-client.exe",
+  "DevelopmentConfig": "D:\\04-Projetos\\25-dev_orchestrator\\.runtime\\development\\operational.json",
+  "DiscordTokenFile": "D:\\04-Projetos\\25-dev_orchestrator\\.runtime\\development\\discord_token",
+  "DevelopmentVolume": "dev-orchestrator-development-state",
+  "RuntimeAuthVolume": "dev-orchestrator-runtime-auth"
+}

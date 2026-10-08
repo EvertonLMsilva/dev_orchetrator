@@ -1,5 +1,7 @@
 .git
 .runtime
+stdout
+tunnel-client
 **/auth.json
 **/authentication.json
 **/audit.jsonl

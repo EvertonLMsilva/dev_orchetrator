@@ -5,7 +5,9 @@ param(
     [string]$Workspace = (Split-Path $PSScriptRoot -Parent),
     [string]$SecuritySource,
     [ValidateRange(1,65535)][int]$LocalPort = 8080,
-    [string]$TunnelExecutable = (Join-Path (Split-Path $PSScriptRoot -Parent) 'tunnel-client/tunnel-client.exe')
+    [string]$TunnelExecutable = (Join-Path (Split-Path $PSScriptRoot -Parent) 'tunnel-client/tunnel-client.exe'),
+    [switch]$Managed,
+    [ValidatePattern('^dev-orchestrator-[a-f0-9]{32}-mcp$')][string]$ManagedProject
 )
 $ErrorActionPreference = 'Stop'
 foreach ($name in 'CONTROL_PLANE_API_KEY', 'MCP_CLIENT_TOKEN', 'CONTROL_PLANE_TUNNEL_ID') {
@@ -25,7 +27,9 @@ if ($SecuritySource) {
 }
 Get-Command docker -ErrorAction Stop | Out-Null
 $root = Split-Path $PSScriptRoot -Parent
-$compose = @('compose', '-p', 'dev-orchestrator-mcp', '-f', "$root/deploy/mcp-read-only.compose.yml")
+if ($Managed -and !$ManagedProject) { throw 'Managed MCP requires unique project identity' }
+$project = if ($Managed) { $ManagedProject } else { 'dev-orchestrator-mcp' }
+$compose = @('compose', '-p', $project, '-f', "$root/deploy/mcp-read-only.compose.yml")
 $keys = @('MCP_CONFIG_FILE','MCP_PROJECT_WORKSPACE','MCP_LOCAL_PORT','MCP_SECURITY_VOLUME','MCP_OPERATIONAL_VOLUME','MCP_RUNTIME_IMAGE','MCP_RUNTIME_AUTHORIZATION')
 $saved = @{}
 foreach ($key in $keys) { $saved[$key] = [Environment]::GetEnvironmentVariable($key) }
@@ -35,20 +39,9 @@ $env:MCP_LOCAL_PORT = "$LocalPort"
 $env:MCP_SECURITY_VOLUME = 'dev-orchestrator-mcp-security'
 $env:MCP_OPERATIONAL_VOLUME = 'dev-orchestrator-mcp-state'
 $env:MCP_RUNTIME_IMAGE = 'dev-orchestrator-mcp-read-only'
-function Invoke-Docker([string[]]$Arguments, [int]$Timeout = 60) {
-    $job = Start-Job -ArgumentList (,$Arguments) -ScriptBlock {
-        param($a)
-        $output = & docker @a 2>&1 | Select-Object -Last 80
-        @{ Code = $LASTEXITCODE; Output = ($output -join "`n") }
-    }
-    try {
-        if (!(Wait-Job $job -Timeout $Timeout)) { throw 'MCP Docker operation timed out' }
-        $result = Receive-Job $job
-        if ($result.Code -ne 0) { throw 'MCP Docker operation failed (output suppressed)' }
-        return $result.Output
-    } finally { Stop-Job $job; Remove-Job $job }
-}
+. "$PSScriptRoot/runtime-docker.ps1"
 $started = $false
+$detached = $false
 try {
     Invoke-Docker @('info') | Out-Null
     Invoke-Docker ($compose + @('config','--quiet')) | Out-Null
@@ -76,6 +69,7 @@ try {
     try { $response = Invoke-WebRequest "http://127.0.0.1:$LocalPort/readyz" -UseBasicParsing -TimeoutSec 5 }
     catch { throw 'MCP readiness request failed' }
     if ($response.StatusCode -ne 200) { throw 'MCP readiness failed' }
+    if ($Managed) { $detached = $true; return }
     Write-Output 'MCP ready. Starting foreground Tunnel; Ctrl+C stops this operation. Tunnel output is suppressed.'
     $env:MCP_RUNTIME_AUTHORIZATION = 'Bearer ' + $env:MCP_CLIENT_TOKEN
     # Explicit references keep credentials out of command lines. Disable file/raw logging.
@@ -89,7 +83,7 @@ try {
     if ($LASTEXITCODE -ne 0) { throw 'MCP Tunnel exited unsuccessfully (output suppressed)' }
 } finally {
     try {
-        if ($started) { Invoke-Docker ($compose + @('stop','--timeout','120','orchestrator')) 150 | Out-Null }
+        if ($started -and !$detached) { Invoke-Docker ($compose + @('stop','--timeout','120','orchestrator')) 150 | Out-Null }
     } finally {
         foreach ($key in $keys) { [Environment]::SetEnvironmentVariable($key, $saved[$key]) }
     }

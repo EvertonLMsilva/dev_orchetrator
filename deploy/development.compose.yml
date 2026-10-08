@@ -1,0 +1,47 @@
+# Operational configuration and private Linux roots are provisioned externally.
+# The registry remains the only project authority. No registration at startup.
+services:
+  development:
+    image: dev-orchestrator-development
+    build:
+      context: ..
+      dockerfile: Dockerfile
+      target: development-runtime
+    command: ["--operational", "--config", "/run/config/development.json", "--ready-listen", "127.0.0.1:8081"]
+    init: true
+    read_only: true
+    restart: "no"
+    stop_grace_period: 35s
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    tmpfs:
+      - /tmp:rw,nosuid,nodev,size=512m
+    volumes:
+      - type: bind
+        source: ${DEV_CONFIG_FILE:?explicit operational config required}
+        target: /run/config/development.json
+        read_only: true
+        bind: {create_host_path: false}
+      - type: volume
+        source: operational
+        target: /development
+      - type: volume
+        source: runtime-auth
+        target: /var/lib/dev-orchestrator/runtime-auth
+      - /var/run/docker.sock:/var/run/docker.sock
+    secrets: [discord_token]
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/orchestrator", "-mcp-health", "http://127.0.0.1:8081/readyz"]
+      interval: 2s
+      timeout: 3s
+      retries: 5
+volumes:
+  operational:
+    external: true
+    name: ${DEV_OPERATIONAL_VOLUME:?preprovisioned private roots required}
+  runtime-auth:
+    external: true
+    name: ${DEV_RUNTIME_AUTH_VOLUME:?existing runtime auth required}
+secrets:
+  discord_token:
+    file: ${DEV_DISCORD_TOKEN_FILE:?external credential file required}
