@@ -11,12 +11,13 @@ import (
 var ErrCandidateCleanup = ports.ErrCandidateCleanup
 
 type CandidateRequest struct {
-	Context           domain.CandidateContext
-	Objective         string
-	SourceRoot        string
-	WorkspaceIdentity string
-	Policy            domain.CandidatePolicy
-	Timeout           time.Duration
+	Context               domain.CandidateContext
+	Objective             string
+	RequestedWriteTargets []string
+	SourceRoot            string
+	WorkspaceIdentity     string
+	Policy                domain.CandidatePolicy
+	Timeout               time.Duration
 }
 type CandidatePipeline struct {
 	generator ports.CandidateGenerator
@@ -31,6 +32,10 @@ func NewCandidatePipeline(g ports.CandidateGenerator, f ports.CandidateWorkspace
 func (p *CandidatePipeline) Generate(ctx context.Context, r CandidateRequest) (artifact domain.CandidateArtifact, err error) {
 	if p == nil || p.generator == nil || p.factory == nil || r.Context.Validate() != nil || r.Policy.Validate() != nil || r.Timeout <= 0 || r.Timeout > 10*time.Minute || r.Objective == "" || len(r.Objective) > 16384 {
 		return artifact, domain.ErrCandidateDenied
+	}
+	intent := DevelopmentIntent{Objective: r.Objective, RequestedWriteTargets: append([]string(nil), r.RequestedWriteTargets...)}
+	if err := intent.ValidateWriteTargets(r.Policy); err != nil {
+		return artifact, err
 	}
 	ctx, cancel := context.WithTimeout(ctx, r.Timeout)
 	defer cancel()
@@ -60,7 +65,9 @@ func (p *CandidatePipeline) Generate(ctx context.Context, r CandidateRequest) (a
 	for i := range inputs {
 		inputs[i] = inputs[i].Clone()
 	}
-	output, err := p.generator.Generate(ctx, ports.CandidateGenerationRequest{Context: r.Context, Objective: r.Objective, Inputs: inputs, WriteTargets: append([]string(nil), r.Policy.WriteTargets...), SchemaVersion: domain.WriteSchemaVersion})
+	// The model sees only requested targets already checked against policy.
+	// Detached copies prevent model adapters from changing trusted constraints.
+	output, err := p.generator.Generate(ctx, ports.CandidateGenerationRequest{Context: r.Context, Objective: r.Objective, Inputs: inputs, WriteTargets: append([]string(nil), intent.RequestedWriteTargets...), SchemaVersion: domain.WriteSchemaVersion})
 	if err != nil {
 		return artifact, err
 	}
@@ -82,6 +89,9 @@ func (p *CandidatePipeline) Generate(ctx context.Context, r CandidateRequest) (a
 	}
 	if err = ctx.Err(); err != nil {
 		return domain.CandidateArtifact{}, err
+	}
+	if !intent.permitsArtifact(artifact, r.Policy) {
+		return domain.CandidateArtifact{}, domain.ErrCandidateDenied
 	}
 	return artifact, nil
 }

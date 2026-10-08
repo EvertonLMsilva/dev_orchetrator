@@ -48,7 +48,7 @@ func (g *Gateway) SetDevelopmentService(ctx context.Context, service conversatio
 func developmentDefinitions() []sdk.ApplicationCommandCreate {
 	max := 1024
 	return []sdk.ApplicationCommandCreate{
-		sdk.SlashCommandCreate{Name: "develop", Description: "Propose a controlled pilot file change", Options: []sdk.ApplicationCommandOption{sdk.ApplicationCommandOptionString{Name: "intent", Description: "Requested file change", Required: true, MaxLength: &max}}},
+		sdk.SlashCommandCreate{Name: "develop", Description: "Propose a controlled pilot file change", Options: []sdk.ApplicationCommandOption{sdk.ApplicationCommandOptionString{Name: "intent", Description: "Requested file change", Required: true, MaxLength: &max}, sdk.ApplicationCommandOptionString{Name: "targets", Description: `Requested paths as JSON array, e.g. ["note.txt"]`, Required: true, MaxLength: &max}}},
 		sdk.SlashCommandCreate{Name: "develop-confirm", Description: "Confirm the exact displayed operation", Options: []sdk.ApplicationCommandOption{sdk.ApplicationCommandOptionString{Name: "identity", Description: "Displayed operation identity", Required: true}}},
 		sdk.SlashCommandCreate{Name: "develop-cancel", Description: "Block the current pilot task"},
 		sdk.SlashCommandCreate{Name: "develop-status", Description: "Consult a persisted development cycle", Options: []sdk.ApplicationCommandOption{sdk.ApplicationCommandOptionString{Name: "cycle", Description: "Trusted cycle reference", Required: true}}},
@@ -93,6 +93,13 @@ func (g *Gateway) handleConversation(ack context.Context, i sdk.ApplicationComma
 		}
 		input.Actor = ports.ActorEvidence{Provider: "discord", ExternalID: i.User().ID.String()}
 		input.DevelopmentAction = action
+		if action == "begin" {
+			option, present := data.Option("targets")
+			var encoded string
+			if !present || option.Type != sdk.ApplicationCommandOptionTypeString || json.Unmarshal(option.Value, &encoded) != nil || len(encoded) > 1024 || json.Unmarshal([]byte(encoded), &input.RequestedWriteTargets) != nil || len(input.RequestedWriteTargets) == 0 {
+				return nil
+			}
+		}
 		if action == "confirm" || action == "status" {
 			input.Confirmation = text
 			input.Text = ""

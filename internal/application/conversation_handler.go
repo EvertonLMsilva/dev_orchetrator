@@ -10,6 +10,8 @@ import (
 type ConversationInput struct {
 	Source ConversationSource
 	Text   string
+	// RequestedWriteTargets constrains Development writes; it grants no authority.
+	RequestedWriteTargets []string
 	// Evidence is supplied by the verified adapter event, never parsed from Text.
 	Actor             ports.ActorEvidence
 	DevelopmentAction string

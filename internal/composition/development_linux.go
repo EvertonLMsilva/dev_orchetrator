@@ -215,7 +215,7 @@ func (s *DevelopmentService) Handle(ctx context.Context, input application.Conve
 	var err error
 	switch input.DevelopmentAction {
 	case "begin":
-		out, err = s.Begin(ctx, input.Actor, input.Text)
+		out, err = s.Begin(ctx, input.Actor, application.DevelopmentIntent{Objective: input.Text, RequestedWriteTargets: input.RequestedWriteTargets})
 	case "confirm":
 		out, err = s.Confirm(ctx, input.Actor, input.Confirmation)
 	case "cancel":

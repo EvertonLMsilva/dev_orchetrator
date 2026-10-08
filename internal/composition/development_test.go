@@ -52,7 +52,7 @@ func TestDevelopmentPlannerFailureAndBlockPersistence(t *testing.T) {
 				return errors.New("SECRET_PLANNER")
 			}}
 			service, _, _, file, e := developmentFixture(t, []string{"WRITE_APPLY"}, p, developmentGenerator{})
-			out, err := service.Begin(context.Background(), e, "create note.txt")
+			out, err := service.Begin(context.Background(), e, application.DevelopmentIntent{Objective: "create note.txt", RequestedWriteTargets: []string{"note.txt"}})
 			if err == nil || out.Review != nil || strings.Contains(err.Error(), "SECRET") {
 				t.Fatal("unsafe failure", err)
 			}
@@ -76,7 +76,7 @@ func TestDevelopmentPlannerFailureAndBlockPersistence(t *testing.T) {
 			if _, err := os.Stat(file); !os.IsNotExist(err) {
 				t.Fatal("effect after planner failure")
 			}
-			if _, err := service.Begin(context.Background(), e, "retry"); err == nil {
+			if _, err := service.Begin(context.Background(), e, application.DevelopmentIntent{Objective: "retry", RequestedWriteTargets: []string{"note.txt"}}); err == nil {
 				t.Fatal("automatic retry")
 			}
 		})
@@ -86,7 +86,7 @@ func TestDevelopmentPlannerFailureAndBlockPersistence(t *testing.T) {
 func TestDevelopmentPrePlannerDenialEvidence(t *testing.T) {
 	service, _, _, _, e := developmentFixture(t, nil, developmentPlanner{fail: func() error { t.Fatal("pre-gate reached planner"); return nil }}, developmentGenerator{})
 	for _, stage := range []string{"REQUEST_ROUTE", "REQUEST_ACTION", "SERVICE_STOPPED"} {
-		in := application.ConversationInput{Source: service.config.Route, Actor: e, DevelopmentAction: "begin", Text: "create note.txt"}
+		in := application.ConversationInput{Source: service.config.Route, Actor: e, DevelopmentAction: "begin", RequestedWriteTargets: []string{"note.txt"}, Text: "create note.txt"}
 		if stage == "REQUEST_ROUTE" {
 			in.Source.ChannelID = "other"
 		} else if stage == "REQUEST_ACTION" {
@@ -111,7 +111,7 @@ func TestDevelopmentPrePlannerDenialEvidence(t *testing.T) {
 
 func TestDevelopmentPlannerFailureChannelEvidence(t *testing.T) {
 	service, _, _, _, e := developmentFixture(t, nil, developmentPlanner{fail: func() error { return ports.NewPlannerFailure("HOST_START", errors.New("SECRET_DOCKER")) }}, developmentGenerator{})
-	in := application.ConversationInput{Source: service.config.Route, Actor: e, DevelopmentAction: "begin", Text: "create note.txt"}
+	in := application.ConversationInput{Source: service.config.Route, Actor: e, DevelopmentAction: "begin", RequestedWriteTargets: []string{"note.txt"}, Text: "create note.txt"}
 	response := service.Handle(context.Background(), in)
 	if response.Status != "REJECTED" || !strings.Contains(response.Message, "HOST_START") || !strings.Contains(response.Message, "corr") || strings.Contains(response.Message, "SECRET") {
 		t.Fatal("unsafe or missing evidence", response)
@@ -184,7 +184,7 @@ func developmentFixture(t *testing.T, ops []string, p developmentPlanner, g deve
 func TestDevelopmentE2ESeparateConfirmations(t *testing.T) {
 	service, _, _, file, e := developmentFixture(t, []string{"WRITE_APPLY", "GIT_BRANCH", "GIT_COMMIT"}, developmentPlanner{}, developmentGenerator{})
 	ctx := context.Background()
-	out, err := service.Begin(ctx, e, "create note.txt containing hello followed by newline")
+	out, err := service.Begin(ctx, e, application.DevelopmentIntent{Objective: "create note.txt containing hello followed by newline", RequestedWriteTargets: []string{"note.txt"}})
 	if err != nil || out.Review == nil {
 		t.Fatal(out, err)
 	}
@@ -230,7 +230,7 @@ func TestDevelopmentE2ESeparateConfirmations(t *testing.T) {
 func TestDevelopmentConcurrentConfirmation(t *testing.T) {
 	service, _, _, _, e := developmentFixture(t, []string{"WRITE_APPLY", "GIT_BRANCH", "GIT_COMMIT"}, developmentPlanner{}, developmentGenerator{})
 	ctx := context.Background()
-	out, err := service.Begin(ctx, e, "create note.txt")
+	out, err := service.Begin(ctx, e, application.DevelopmentIntent{Objective: "create note.txt", RequestedWriteTargets: []string{"note.txt"}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -255,7 +255,7 @@ func TestDevelopmentConcurrentConfirmation(t *testing.T) {
 func TestDevelopmentChannelEvidenceAndRoute(t *testing.T) {
 	service, _, _, file, e := developmentFixture(t, []string{"WRITE_APPLY", "GIT_BRANCH", "GIT_COMMIT"}, developmentPlanner{}, developmentGenerator{})
 	ctx := context.Background()
-	in := application.ConversationInput{Source: service.config.Route, Actor: e, DevelopmentAction: "begin", Text: "create note.txt"}
+	in := application.ConversationInput{Source: service.config.Route, Actor: e, DevelopmentAction: "begin", RequestedWriteTargets: []string{"note.txt"}, Text: "create note.txt"}
 	bad := in
 	bad.Source.ChannelID = "other"
 	if service.Handle(ctx, bad).Status != "REJECTED" {
@@ -299,7 +299,7 @@ func TestDevelopmentChannelEvidenceAndRoute(t *testing.T) {
 func TestDevelopmentChannelDeniedGateReturnsPartialReceipt(t *testing.T) {
 	service, _, _, _, e := developmentFixture(t, []string{"WRITE_APPLY"}, developmentPlanner{}, developmentGenerator{})
 	ctx := context.Background()
-	out, err := service.Begin(ctx, e, "create note.txt")
+	out, err := service.Begin(ctx, e, application.DevelopmentIntent{Objective: "create note.txt", RequestedWriteTargets: []string{"note.txt"}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -329,7 +329,7 @@ func TestDevelopmentDeniedGates(t *testing.T) {
 			}
 			service, _, _, file, e := developmentFixture(t, grants, developmentPlanner{}, developmentGenerator{})
 			ctx := context.Background()
-			out, err := service.Begin(ctx, e, "create note.txt")
+			out, err := service.Begin(ctx, e, application.DevelopmentIntent{Objective: "create note.txt", RequestedWriteTargets: []string{"note.txt"}})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -382,7 +382,7 @@ func TestDevelopmentDeniedGates(t *testing.T) {
 			if failure == "cancel" {
 				cancel()
 			}
-			if _, err := service.Begin(ctx, e, "create note.txt"); err == nil {
+			if _, err := service.Begin(ctx, e, application.DevelopmentIntent{Objective: "create note.txt", RequestedWriteTargets: []string{"note.txt"}}); err == nil {
 				t.Fatal("failure accepted")
 			}
 			if _, err := os.Stat(file); !os.IsNotExist(err) {

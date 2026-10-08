@@ -429,6 +429,18 @@ func (s *OperationalDevelopmentService) Handle(ctx context.Context, in applicati
 		}
 		p := s.projects[project]
 		r := operationalCycleRecord{ProjectID: project, TaskID: domain.TaskID("task-" + key), CorrelationID: key, Branch: p.Development.BranchPrefix + key, PrincipalID: principal.ID, ConfigIdentity: operationalProjectIdentity(p), Source: in.Source, RecoveryRequired: true, Output: application.DevelopmentOutput{Result: application.DevelopmentResult{ProjectID: project, TaskID: domain.TaskID("task-" + key), CorrelationID: key}}}
+		// Deny explicit user targets before provisioning any workspace or Git repository.
+		intent := application.DevelopmentIntent{Objective: in.Text, RequestedWriteTargets: in.RequestedWriteTargets}
+		if intent.ValidateWriteTargets(p.Development.Policy) != nil {
+			r.RecoveryRequired = false
+			r.Output.Result.TaskState = domain.TaskStatusBlocked
+			s.records[key] = r
+			if s.save() != nil {
+				s.stopped = true
+				return application.ConversationResponse{Status: "BLOCKED", Message: "Persistência bloqueada."}
+			}
+			return application.ConversationResponse{Status: "REJECTED", Message: "Targets solicitados negados. Referência: " + key}
+		}
 		s.records[key] = r
 		if s.save() != nil {
 			s.stopped = true

@@ -125,7 +125,7 @@ func (s *DevelopmentCycle) block(ctx context.Context) error {
 	}
 	return nil
 }
-func (s *DevelopmentCycle) Begin(ctx context.Context, e ports.ActorEvidence, intent string) (DevelopmentOutput, error) {
+func (s *DevelopmentCycle) Begin(ctx context.Context, e ports.ActorEvidence, intent DevelopmentIntent) (DevelopmentOutput, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.started || s.terminal {
@@ -134,7 +134,7 @@ func (s *DevelopmentCycle) Begin(ctx context.Context, e ports.ActorEvidence, int
 	if _, err := s.auth.AuthenticateActor(ctx, e); err != nil {
 		return s.output(), err
 	}
-	if intent == "" || len(intent) > 1024 {
+	if intent.Objective == "" || len(intent.Objective) > 1024 {
 		return s.output(), domain.ErrWriteDenied
 	}
 	task, found, err := s.tasks.FindByID(ctx, s.config.Context.TaskID)
@@ -143,9 +143,14 @@ func (s *DevelopmentCycle) Begin(ctx context.Context, e ports.ActorEvidence, int
 	}
 	s.started = true
 	s.result.TaskState = task.Status
+	intent.RequestedWriteTargets = append([]string(nil), intent.RequestedWriteTargets...)
+	if err := intent.ValidateWriteTargets(s.config.Policy); err != nil {
+		blockErr := s.block(ctx)
+		return s.output(), errors.Join(domain.ErrWriteDenied, err, blockErr)
+	}
 	ctx, cancel := context.WithTimeout(ctx, s.config.Timeout)
 	defer cancel()
-	req := OrchestrationInput{ProjectID: task.ProjectID, TaskID: task.ID, Context: ports.PlannerContext{Project: domain.Project{ID: task.ProjectID}, CurrentTask: task}, UserIntent: intent}
+	req := OrchestrationInput{ProjectID: task.ProjectID, TaskID: task.ID, Context: ports.PlannerContext{Project: domain.Project{ID: task.ProjectID}, CurrentTask: task}, UserIntent: intent.Objective}
 	plan, err := s.planner.Run(ctx, req)
 	d := plan.Decision
 	if err != nil || ctx.Err() != nil || d.Validate() != nil || d.ProjectID != task.ProjectID || d.TaskID != task.ID {
@@ -174,7 +179,7 @@ func (s *DevelopmentCycle) Begin(ctx context.Context, e ports.ActorEvidence, int
 		s.block(ctx)
 		return s.output(), err
 	}
-	s.artifact, err = s.pipeline.Generate(ctx, CandidateRequest{Context: s.config.Context, Objective: intent, WorkspaceIdentity: s.config.WorkspaceIdentity, Policy: s.config.Policy, Timeout: s.config.Timeout})
+	s.artifact, err = s.pipeline.Generate(ctx, CandidateRequest{Context: s.config.Context, Objective: intent.Objective, RequestedWriteTargets: intent.RequestedWriteTargets, WorkspaceIdentity: s.config.WorkspaceIdentity, Policy: s.config.Policy, Timeout: s.config.Timeout})
 	if err != nil {
 		s.block(ctx)
 		return s.output(), err

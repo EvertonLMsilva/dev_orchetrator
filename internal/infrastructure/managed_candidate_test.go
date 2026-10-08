@@ -39,7 +39,7 @@ func TestManagedCandidateActorWriteGit(t *testing.T) {
 		t.Fatal(err)
 	}
 	factory := NewManagedCandidateWorkspaceFactory(s, w, t.TempDir())
-	a, err := application.NewCandidatePipeline(managedGenerator{}, factory).Generate(ctx, application.CandidateRequest{Context: domain.CandidateContext{ProjectID: "project", TaskID: "task", CorrelationID: "corr"}, Objective: "replace old.txt", WorkspaceIdentity: w.Identity(), Policy: policy, Timeout: time.Second})
+	a, err := application.NewCandidatePipeline(managedGenerator{}, factory).Generate(ctx, application.CandidateRequest{Context: domain.CandidateContext{ProjectID: "project", TaskID: "task", CorrelationID: "corr"}, Objective: "replace old.txt", RequestedWriteTargets: []string{"old.txt"}, WorkspaceIdentity: w.Identity(), Policy: policy, Timeout: time.Second})
 	if err != nil {
 		t.Fatal(err)
 	}
