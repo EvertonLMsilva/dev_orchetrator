@@ -39,10 +39,18 @@ func run(ctx context.Context, args []string) (result error) {
 	tokenPath := flags.String("discord-token-file", "/run/secrets/discord_token", "Discord credential")
 	register := flags.String("register-commands", "", "explicit Discord application ID registration")
 	check := flags.Bool("check-config", false, "offline validation")
+	operational := flags.Bool("operational", false, "trusted multi-project configuration")
 	if flags.Parse(args) != nil || flags.NArg() != 0 || *configPath == "" {
 		return errors.New("invalid pilot configuration")
 	}
-	c, err := composition.LoadDevelopmentConfig(*configPath)
+	var c composition.DevelopmentConfig
+	var oc composition.OperationalDevelopmentConfig
+	var err error
+	if *operational {
+		oc, err = composition.LoadOperationalDevelopmentConfig(*configPath)
+	} else {
+		c, err = composition.LoadDevelopmentConfig(*configPath)
+	}
 	if err != nil {
 		return err
 	}
@@ -66,7 +74,10 @@ func run(ctx context.Context, args []string) (result error) {
 	if err != nil {
 		return errors.New("Discord credential unavailable")
 	}
-	var service *composition.DevelopmentService
+	var service interface {
+		Handle(context.Context, application.ConversationInput) application.ConversationResponse
+		Shutdown(context.Context) error
+	}
 	defer func() {
 		shutdown, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
@@ -87,7 +98,19 @@ func run(ctx context.Context, args []string) (result error) {
 		defer cancel()
 		return g.RegisterCommands(bounded, id)
 	}
-	service, err = composition.NewDevelopmentService(ctx, c)
+	if *operational {
+		var candidate *composition.OperationalDevelopmentService
+		candidate, err = composition.NewOperationalDevelopmentService(ctx, oc)
+		if err == nil {
+			service = candidate
+		}
+	} else {
+		var candidate *composition.DevelopmentService
+		candidate, err = composition.NewDevelopmentService(ctx, c)
+		if err == nil {
+			service = candidate
+		}
+	}
 	if err != nil {
 		return err
 	}

@@ -1,0 +1,51 @@
+{
+  "Registry": {
+    "StateDir": "/var/lib/dev-orchestrator/operational-state",
+    "Projects": [
+      {
+        "ID": "alpha",
+        "Name": "Alpha controlled project",
+        "Workspace": "/var/lib/dev-orchestrator/projects/alpha",
+        "Development": {
+          "PolicyVersion": "alpha-v1",
+          "BranchPrefix": "codex/alpha/",
+          "Policy": {
+            "InputTargets": [],
+            "WriteTargets": ["note.txt"],
+            "Limits": {"MaxOperations": 1, "MaxFileBytes": 256, "MaxTotalBytes": 256, "MaxPathBytes": 256, "MaxOutputBytes": 4096}
+          }
+        }
+      },
+      {
+        "ID": "beta",
+        "Name": "Beta controlled project",
+        "Workspace": "/var/lib/dev-orchestrator/projects/beta",
+        "Development": {
+          "PolicyVersion": "beta-v1",
+          "BranchPrefix": "codex/beta/",
+          "Policy": {
+            "InputTargets": [],
+            "WriteTargets": ["summary.txt"],
+            "Limits": {"MaxOperations": 1, "MaxFileBytes": 512, "MaxTotalBytes": 512, "MaxPathBytes": 256, "MaxOutputBytes": 8192}
+          }
+        }
+      }
+    ],
+    "Routes": [
+      {"Source": {"GuildID": "1", "ChannelID": "2"}, "ProjectID": "alpha"},
+      {"Source": {"GuildID": "1", "ChannelID": "3"}, "ProjectID": "beta"}
+    ]
+  },
+  "ScratchRoot": "/var/lib/dev-orchestrator/operational-scratch",
+  "MaxActive": 4,
+  "MaxCycles": 128,
+  "Mappings": [{"Evidence": {"Provider": "discord", "ExternalID": "123"}, "Principal": {"ID": "operator"}}],
+  "Grants": [
+    {"PrincipalID": "operator", "ProjectID": "alpha", "Operation": "WRITE_APPLY"},
+    {"PrincipalID": "operator", "ProjectID": "alpha", "Operation": "GIT_BRANCH"},
+    {"PrincipalID": "operator", "ProjectID": "alpha", "Operation": "GIT_COMMIT"},
+    {"PrincipalID": "operator", "ProjectID": "beta", "Operation": "WRITE_APPLY"},
+    {"PrincipalID": "operator", "ProjectID": "beta", "Operation": "GIT_BRANCH"},
+    {"PrincipalID": "operator", "ProjectID": "beta", "Operation": "GIT_COMMIT"}
+  ]
+}

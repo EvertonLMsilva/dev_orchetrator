@@ -83,6 +83,13 @@ func (s *DevelopmentCycle) output() DevelopmentOutput {
 	}
 	return out
 }
+
+// Snapshot returns a detached receipt for trusted operational persistence.
+func (s *DevelopmentCycle) Snapshot() DevelopmentOutput {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.output()
+}
 func (s *DevelopmentCycle) setReview(r DevelopmentReview) {
 	r.ExpiresAt = s.now().Add(s.config.ApprovalTTL)
 	r.Identity = ""
