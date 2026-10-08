@@ -51,6 +51,7 @@ func developmentDefinitions() []sdk.ApplicationCommandCreate {
 		sdk.SlashCommandCreate{Name: "develop", Description: "Propose a controlled pilot file change", Options: []sdk.ApplicationCommandOption{sdk.ApplicationCommandOptionString{Name: "intent", Description: "Requested file change", Required: true, MaxLength: &max}}},
 		sdk.SlashCommandCreate{Name: "develop-confirm", Description: "Confirm the exact displayed operation", Options: []sdk.ApplicationCommandOption{sdk.ApplicationCommandOptionString{Name: "identity", Description: "Displayed operation identity", Required: true}}},
 		sdk.SlashCommandCreate{Name: "develop-cancel", Description: "Block the current pilot task"},
+		sdk.SlashCommandCreate{Name: "develop-status", Description: "Consult a persisted development cycle", Options: []sdk.ApplicationCommandOption{sdk.ApplicationCommandOptionString{Name: "cycle", Description: "Trusted cycle reference", Required: true}}},
 	}
 }
 func conversationDefinitions() []sdk.ApplicationCommandCreate {
@@ -68,6 +69,9 @@ func (g *Gateway) handleConversation(ack context.Context, i sdk.ApplicationComma
 			optionName = "identity"
 		case "develop-cancel":
 			action = "cancel"
+		case "develop-status":
+			action = "status"
+			optionName = "cycle"
 		default:
 			return nil
 		}
@@ -89,7 +93,7 @@ func (g *Gateway) handleConversation(ack context.Context, i sdk.ApplicationComma
 		}
 		input.Actor = ports.ActorEvidence{Provider: "discord", ExternalID: i.User().ID.String()}
 		input.DevelopmentAction = action
-		if action == "confirm" {
+		if action == "confirm" || action == "status" {
 			input.Confirmation = text
 			input.Text = ""
 		}

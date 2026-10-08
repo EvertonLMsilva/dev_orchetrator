@@ -31,10 +31,18 @@ func (d *Duration) UnmarshalJSON(data []byte) error {
 }
 
 type ProjectConfig struct {
-	ID        domain.ProjectID
-	Name      string
-	Workspace string
-	Evidence  map[domain.ActionType]domain.ActionParams
+	ID          domain.ProjectID
+	Name        string
+	Workspace   string
+	Evidence    map[domain.ActionType]domain.ActionParams
+	Development *ProjectDevelopmentConfig `json:",omitempty"`
+}
+
+// Trusted operational policy; READ compositions do not consume this capability.
+type ProjectDevelopmentConfig struct {
+	Policy        domain.CandidatePolicy
+	PolicyVersion string
+	BranchPrefix  string
 }
 type Config struct {
 	StateDir         string

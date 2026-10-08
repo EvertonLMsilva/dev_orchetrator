@@ -77,5 +77,9 @@ para desenvolvimento/validação; o runtime do Local Agent será decidido no P2.
 
 ## Primeiro passo
 
+A evolução pós-MVP está registrada em [P11 — Operational Runtime & Multi-Project Bootstrap](docs/tasks/P11.md).
+O MVP permanece DONE; P11.1 adiciona o modo operacional explícito, enquanto
+P11.2 e P11.3 permanecem futuras.
+
 Não implemente integrações ainda. Comece em `P0.1`, refinando uma task
 por vez segundo `docs/TASK_SPEC.md`.

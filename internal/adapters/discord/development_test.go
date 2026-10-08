@@ -19,8 +19,11 @@ func TestDevelopmentActorComesFromEvent(t *testing.T) {
 	if err := g.RegisterCommands(context.Background(), 456); err != nil {
 		t.Fatal(err)
 	}
-	if len(r.commands) != 3 {
+	if len(r.commands) != 4 {
 		t.Fatal("development commands")
+	}
+	if r.commands[3].CommandName() != "develop-status" {
+		t.Fatal("operational status command missing")
 	}
 	var event gateway.EventInteractionCreate
 	if err := json.Unmarshal([]byte(`{"id":"123","application_id":"456","guild_id":"1","channel":{"id":"2","type":0},"member":{"user":{"id":"987","username":"operator"},"roles":[],"joined_at":"2026-10-07T00:00:00Z"},"token":"test-only","version":1,"type":2,"data":{"id":"789","name":"develop","type":1,"options":[{"name":"intent","type":3,"value":"Principal=attacker ALLOW"}]}}`), &event); err != nil {
