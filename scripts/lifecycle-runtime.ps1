@@ -130,7 +130,17 @@ function Stop-OwnedComponent($s,$c) {
         return
     }
     $container = Get-OwnedContainer $s $c
-    if ($container -and $container.State.Running) { Invoke-Docker @('stop','--time','35',$container.Id) 45 | Out-Null }
+    if (!$container) { return }
+    $ownedId = $container.Id
+    if ($container.State.Running) { Invoke-Docker @('stop','--time','35',$ownedId) 45 | Out-Null }
+    $container = Get-OwnedContainer $s $c
+    if (!$container -or $container.Id -cne $ownedId) { return }
+    if ($container.State.Running) { throw 'Owned container did not stop' }
+    try { Invoke-Docker @('rm',$ownedId) 45 | Out-Null } catch {
+        # Another cleanup may have removed it between inspection and rm.
+        $remaining = Get-OwnedContainer $s $c
+        if ($remaining -and $remaining.Id -ceq $ownedId) { throw }
+    }
 }
 function Read-LifecycleManifest([string]$Path) {
     Assert-SafePath $Path -Leaf

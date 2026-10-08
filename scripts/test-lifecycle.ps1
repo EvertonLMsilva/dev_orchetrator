@@ -13,7 +13,7 @@ function New-Fake {
         Wait={ param($s,$c) $f.Calls.Add("wait:$c"); if ($f.Fail -eq "wait:$c") { throw [OperationCanceledException]::new() } }
         Owned={ param($s,$c) $s -and $f.Live[$c] -and $f.Identity[$c] -eq $s.Instance }
         Healthy={ param($s,$c) $f.Live[$c] -and $f.Fail -ne "health:$c" }
-        Stop={ param($s,$c) $f.Calls.Add("stop:$c"); $f.Live[$c]=$false }
+        Stop={ param($s,$c) if (!$f.Identity.ContainsKey($c) -or $f.Identity[$c] -ne $s.Instance) { return }; $f.Calls.Add("stop:$c"); $f.Live[$c]=$false }
     }
 }
 $a=New-Fake
@@ -30,6 +30,12 @@ $f.Identity.Tunnel='reused-pid'
 Stop-Lifecycle $a | Out-Null
 Assert ($f.Live.Tunnel) 'foreign process killed'
 Assert (($f.Calls -join ',') -notmatch 'stop:Tunnel') 'ownership bypass'
+$a=New-Fake
+Start-Lifecycle $a | Out-Null
+$f.Live.MCP=$false; $f.Identity.Development='foreign-owner'; $f.Calls.Clear()
+Stop-Lifecycle $a | Out-Null
+Assert ($f.Calls.Contains('stop:MCP')) 'stopped Docker resource skipped during cleanup'
+Assert (!$f.Calls.Contains('stop:Development')) 'foreign Docker resource cleaned'
 foreach ($failure in 'start:MCP','start:Development','start:Tunnel','wait:MCP','wait:Development','wait:Tunnel') {
     $a=New-Fake; $f.Fail=$failure
     try { Start-Lifecycle $a; throw 'accepted failure' } catch { Assert ($_.Exception.Message -ne 'accepted failure') 'failure' }

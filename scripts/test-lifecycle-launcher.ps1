@@ -31,6 +31,14 @@ function Start-Job {
         stop {
             foreach ($container in $p11Fake.Containers.Values) { if ($container.Id -eq $a[-1]) { $container.State.Running=$false } }
         }
+        rm {
+            Assert ($a.Count -eq 2 -and $a[1] -cmatch '^[a-f0-9]{64}$') 'unsafe container removal'
+            $project=@($p11Fake.Containers.Keys | Where-Object { $p11Fake.Containers[$_].Id -eq $a[1] })
+            foreach ($key in $project) {
+                Assert (!$p11Fake.Containers[$key].State.Running) 'running container removed'
+                $p11Fake.Containers.Remove($key)
+            }
+        }
         compose {
             $project=$a[2]
             if ($a -contains 'up') {
@@ -89,9 +97,18 @@ try {
             Assert ([Convert]::ToBase64String([IO.File]::ReadAllBytes($LifecycleFile)) -ceq $metadataBefore) 'status wrote metadata'
             $development.State.Running=$true
             Assert ((Invoke-LifecycleCommand stop '') -eq 'STOPPED') 'production stop'
+            Assert ($p11Fake.Containers.Count -eq 0) 'stop left exited containers owned by A'
+            $before=$p11Fake.Calls.Count
+            Assert ((Invoke-LifecycleCommand stop '') -eq 'STOPPED') 'repeated stop failed'
+            Assert (($p11Fake.Calls | Select-Object -Skip $before) -notmatch '^stop |^rm ') 'repeated stop mutated absent containers'
             Assert ((Invoke-LifecycleCommand status '') -eq 'STOPPED') 'stale stopped ownership'
+            Assert ((Invoke-LifecycleCommand start $manifestFile) -eq 'READY') 'restart B failed'
+            $next=Read-LifecycleState
+            Assert ($next.Instance -cne $state.Instance) 'instance identity became stable'
+            Assert ($p11Fake.Containers.Count -eq 2) 'restart retained containers owned by A'
+            Assert ((Invoke-LifecycleCommand stop '') -eq 'STOPPED') 'stop B failed'
         } else { Assert ($state.Phase -eq 'FAILED') 'missing FAILED' }
-        foreach ($container in $p11Fake.Containers.Values) { Assert (!$container.State.Running) 'rollback leaked container' }
+        Assert ($p11Fake.Containers.Count -eq 0) 'rollback left exited containers owned by attempt'
         Assert (!$p11Fake.Tunnel -or $p11Fake.Tunnel.HasExited) 'rollback leaked tunnel'
         Assert (($p11Fake.Calls -join ',') -notmatch 'fake-secret-sentinel|volume rm|prune|--volumes') 'secret/data contract'
         $decoded=[Text.Encoding]::UTF8.GetString([Security.Cryptography.ProtectedData]::Unprotect([IO.File]::ReadAllBytes($LifecycleFile),[Text.Encoding]::UTF8.GetBytes($LifecycleRoot),[Security.Cryptography.DataProtectionScope]::CurrentUser))

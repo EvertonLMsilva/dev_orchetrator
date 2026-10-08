@@ -20,12 +20,16 @@ $script:dockerCalls=[Collections.Generic.List[string]]::new()
 $script:containerId='b'*64
 $script:project="dev-orchestrator-$($state.Instance)-mcp"
 $script:running=$true
+$script:containerExists=$true
+$script:changeOwnershipOnStop=$false
+$script:failRemove=$false
 function Invoke-Docker($Arguments,$Timeout) {
     $dockerCalls.Add(($Arguments -join ' '))
     switch ($Arguments[0]) {
-        ps { return $containerId }
-        inspect { return (@(@{Id=$containerId;Config=@{Labels=@{'com.docker.compose.project'=$project;'com.docker.compose.service'='orchestrator'}};State=@{Running=$running;Health=@{Status='healthy'}}}) | ConvertTo-Json -Depth 6 -Compress) }
-        stop { $script:running=$false; return '' }
+        ps { if ($containerExists) { return $containerId }; return '' }
+        inspect { return (@(@{Id=$containerId;Config=@{Labels=@{'com.docker.compose.project'=$script:project;'com.docker.compose.service'='orchestrator'}};State=@{Running=$running;Health=@{Status='healthy'}}}) | ConvertTo-Json -Depth 6 -Compress) }
+        stop { Assert ($Timeout -eq 45) 'unbounded stop'; $script:running=$false; if ($changeOwnershipOnStop) { $script:project='foreign-project' }; return '' }
+        rm { Assert ($Arguments.Count -eq 2 -and $Arguments[1] -ceq $containerId -and !$running -and $Timeout -eq 45) 'unsafe container removal'; if ($failRemove) { throw 'fake removal failure' }; $script:containerExists=$false; return '' }
         default { throw 'unexpected Docker operation' }
     }
 }
@@ -33,10 +37,28 @@ Assert (Test-LifecycleOwned $state MCP) 'owned container'
 $state.MCP=@{Id=('c'*64);Project=$project}
 Assert (!(Test-LifecycleOwned $state MCP)) 'replaced container ownership'
 Stop-OwnedComponent $state MCP
-Assert (($dockerCalls -join ',') -notmatch 'stop ') 'replaced container stopped'
+Assert (($dockerCalls -join ',') -notmatch 'stop |rm ') 'replaced container stopped or removed'
 $state.MCP=@{Id=$containerId;Project=$project}
 Stop-OwnedComponent $state MCP
 Assert (!$running) 'owned container not stopped'
+Assert (!$containerExists) 'owned container not removed'
+$before=$dockerCalls.Count
+Stop-OwnedComponent $state MCP
+Assert (($dockerCalls | Select-Object -Skip $before) -notmatch '^stop |^rm ') 'absent container cleanup not idempotent'
+$script:containerExists=$true
+$before=$dockerCalls.Count
+Stop-OwnedComponent $state MCP
+Assert (!$containerExists) 'already stopped owned container not removed'
+Assert (($dockerCalls | Select-Object -Skip $before) -notmatch '^stop ') 'already stopped container stopped again'
+$script:containerExists=$true; $script:running=$true; $script:changeOwnershipOnStop=$true
+$before=$dockerCalls.Count
+Stop-OwnedComponent $state MCP
+Assert ($containerExists) 'container removed after ownership changed during stop'
+Assert (($dockerCalls | Select-Object -Skip $before) -notmatch '^rm ') 'ownership not revalidated after stop'
+$script:project=$state.MCP.Project; $script:changeOwnershipOnStop=$false; $script:failRemove=$true
+$rejected=$false
+try { Stop-OwnedComponent $state MCP } catch { $rejected=$true }
+Assert ($rejected -and $containerExists) 'removal failure reported as success'
 Assert (($dockerCalls -join ',') -notmatch 'volume rm|down|prune') 'data destruction'
 $p=Get-Process -Id $PID
 $state.Tunnel=@{Pid=$PID;Started='1';Executable=$p.MainModule.FileName}
