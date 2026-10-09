@@ -3,6 +3,13 @@
 $ErrorActionPreference='Stop'
 . "$PSScriptRoot/lifecycle-runtime.ps1"
 function Assert($condition,$message) { if (!$condition) { throw $message } }
+$runtimeAst=(Get-Command Invoke-LifecycleCommand).ScriptBlock.Ast
+$argumentAssignment=$runtimeAst.Find({ param($node) $node -is [Management.Automation.Language.AssignmentStatementAst] -and $node.Left.Extent.Text -eq '$arguments' },$true)
+Assert ($null -ne $argumentAssignment) 'Tunnel arguments unavailable'
+$s=@{Port=18088}
+$tunnelArguments=& ([scriptblock]::Create($argumentAssignment.Right.Extent.Text))
+$formatIndex=[array]::IndexOf($tunnelArguments,'--log.format')
+Assert ($formatIndex -ge 0 -and $formatIndex+1 -lt $tunnelArguments.Count -and $tunnelArguments[$formatIndex+1] -ceq 'struct-text') 'Tunnel arguments must include --log.format struct-text'
 $script:LifecycleDirectory=Join-Path ([IO.Path]::GetTempPath()) ('p11-2-'+[guid]::NewGuid().ToString('N'))
 $script:LifecycleFile=Join-Path $LifecycleDirectory 'owner.bin'
 Initialize-LifecycleDirectory

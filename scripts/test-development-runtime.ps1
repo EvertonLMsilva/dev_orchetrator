@@ -3,15 +3,22 @@ $root=Split-Path $PSScriptRoot -Parent
 $ignored=Get-Content -LiteralPath (Join-Path $root '.dockerignore')
 foreach ($private in '.runtime','stdout','tunnel-client') { if ($ignored -notcontains $private) { throw 'Local operational files must be excluded from build context' } }
 $saved=@{}
-foreach ($key in 'DEV_CONFIG_FILE','DEV_DISCORD_TOKEN_FILE','DEV_OPERATIONAL_VOLUME','DEV_RUNTIME_AUTH_VOLUME') { $saved[$key]=[Environment]::GetEnvironmentVariable($key) }
+foreach ($key in 'DEV_CONFIG_FILE','DEV_DISCORD_TOKEN_FILE','DEV_OPERATIONAL_VOLUME','DEV_RUNTIME_AUTH_VOLUME','DEV_NETWORK_NAME','MCP_NETWORK_NAME','MCP_CONFIG_FILE','MCP_PROJECT_WORKSPACE') { $saved[$key]=[Environment]::GetEnvironmentVariable($key) }
 try {
     $env:DEV_CONFIG_FILE=Join-Path $root 'deploy/lifecycle.example.json'
     $env:DEV_DISCORD_TOKEN_FILE=Join-Path $root 'deploy/lifecycle.example.json'
     $env:DEV_OPERATIONAL_VOLUME='test-operational'; $env:DEV_RUNTIME_AUTH_VOLUME='test-auth'
+    $env:DEV_NETWORK_NAME='test-development-network';$env:MCP_NETWORK_NAME='test-mcp-network'
+    $env:MCP_CONFIG_FILE=$env:DEV_CONFIG_FILE;$env:MCP_PROJECT_WORKSPACE=$root
     $raw=& docker compose -f "$root/deploy/development.compose.yml" config --format json
     if ($LASTEXITCODE) { throw 'Development compose config failed' }
     $c=($raw -join "`n") | ConvertFrom-Json
     $s=$c.services.development
+    if (!$c.networks.default.external -or $c.networks.default.name -cne 'test-development-network') { throw 'Development network override ignored' }
+    $mcpRaw=& docker compose -f "$root/deploy/mcp-read-only.compose.yml" config --format json
+    if ($LASTEXITCODE) { throw 'MCP compose config failed' }
+    $mcp=($mcpRaw -join "`n") | ConvertFrom-Json
+    if (!$mcp.networks.default.external -or $mcp.networks.default.name -cne 'test-mcp-network') { throw 'MCP network override ignored' }
     if (!$s.read_only -or !$s.init -or $s.restart -ne 'no' -or $s.cap_drop -notcontains 'ALL' -or $s.security_opt -notcontains 'no-new-privileges:true') { throw 'Development isolation contract' }
     if ($s.command -notcontains '--operational' -or $s.command -notcontains '--ready-listen' -or $s.command -notcontains '127.0.0.1:8081' -or $s.command -contains '--register-commands') { throw 'Development invocation contract' }
     if ($s.PSObject.Properties.Name -contains 'ports') { throw 'Development readiness published' }

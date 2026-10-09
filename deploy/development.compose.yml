@@ -35,6 +35,10 @@ services:
       interval: 2s
       timeout: 3s
       retries: 5
+networks:
+  default:
+    external: true
+    name: ${DEV_NETWORK_NAME:-dev-orchestrator-development-check_default}
 volumes:
   operational:
     external: true
