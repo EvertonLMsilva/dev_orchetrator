@@ -22,3 +22,8 @@ go.work.sum
 *.swo
 .DS_Store
 Thumbs.db
+
+# Private operational state, credentials, downloaded runtimes and evidence
+/.runtime/
+/tunnel-client/
+/stdout

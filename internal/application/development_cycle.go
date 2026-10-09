@@ -6,6 +6,7 @@ import (
 	"dev-orchestrator/internal/ports"
 	"encoding/json"
 	"errors"
+	"log"
 	"sync"
 	"time"
 )
@@ -125,7 +126,7 @@ func (s *DevelopmentCycle) block(ctx context.Context) error {
 	}
 	return nil
 }
-func (s *DevelopmentCycle) Begin(ctx context.Context, e ports.ActorEvidence, intent string) (DevelopmentOutput, error) {
+func (s *DevelopmentCycle) Begin(ctx context.Context, e ports.ActorEvidence, intent DevelopmentIntent) (DevelopmentOutput, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.started || s.terminal {
@@ -134,7 +135,7 @@ func (s *DevelopmentCycle) Begin(ctx context.Context, e ports.ActorEvidence, int
 	if _, err := s.auth.AuthenticateActor(ctx, e); err != nil {
 		return s.output(), err
 	}
-	if intent == "" || len(intent) > 1024 {
+	if intent.Objective == "" || len(intent.Objective) > 1024 {
 		return s.output(), domain.ErrWriteDenied
 	}
 	task, found, err := s.tasks.FindByID(ctx, s.config.Context.TaskID)
@@ -143,9 +144,14 @@ func (s *DevelopmentCycle) Begin(ctx context.Context, e ports.ActorEvidence, int
 	}
 	s.started = true
 	s.result.TaskState = task.Status
+	intent.RequestedWriteTargets = append([]string(nil), intent.RequestedWriteTargets...)
+	if err := intent.ValidateWriteTargets(s.config.Policy); err != nil {
+		blockErr := s.block(ctx)
+		return s.output(), errors.Join(domain.ErrWriteDenied, err, blockErr)
+	}
 	ctx, cancel := context.WithTimeout(ctx, s.config.Timeout)
 	defer cancel()
-	req := OrchestrationInput{ProjectID: task.ProjectID, TaskID: task.ID, Context: ports.PlannerContext{Project: domain.Project{ID: task.ProjectID}, CurrentTask: task}, UserIntent: intent}
+	req := OrchestrationInput{ProjectID: task.ProjectID, TaskID: task.ID, Context: ports.PlannerContext{Project: domain.Project{ID: task.ProjectID}, CurrentTask: task}, UserIntent: intent.Objective}
 	plan, err := s.planner.Run(ctx, req)
 	d := plan.Decision
 	if err != nil || ctx.Err() != nil || d.Validate() != nil || d.ProjectID != task.ProjectID || d.TaskID != task.ID {
@@ -174,7 +180,7 @@ func (s *DevelopmentCycle) Begin(ctx context.Context, e ports.ActorEvidence, int
 		s.block(ctx)
 		return s.output(), err
 	}
-	s.artifact, err = s.pipeline.Generate(ctx, CandidateRequest{Context: s.config.Context, Objective: intent, WorkspaceIdentity: s.config.WorkspaceIdentity, Policy: s.config.Policy, Timeout: s.config.Timeout})
+	s.artifact, err = s.pipeline.Generate(ctx, CandidateRequest{Context: s.config.Context, Objective: intent.Objective, RequestedWriteTargets: intent.RequestedWriteTargets, WorkspaceIdentity: s.config.WorkspaceIdentity, Policy: s.config.Policy, Timeout: s.config.Timeout})
 	if err != nil {
 		s.block(ctx)
 		return s.output(), err
@@ -209,7 +215,12 @@ func (s *DevelopmentCycle) Begin(ctx context.Context, e ports.ActorEvidence, int
 func (s *DevelopmentCycle) Confirm(ctx context.Context, e ports.ActorEvidence, identity string) (DevelopmentOutput, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.terminal || s.pending == nil || identity != s.pending.Identity || !s.now().Before(s.pending.ExpiresAt) {
+	if s.terminal || s.pending == nil || identity != s.pending.Identity {
+		log.Print("CONFIRM_LOOKUP_DENIED")
+		return s.output(), domain.ErrWriteDenied
+	}
+	if !s.now().Before(s.pending.ExpiresAt) {
+		log.Print("CONFIRM_EXPIRED")
 		return s.output(), domain.ErrWriteDenied
 	}
 	if err := ctx.Err(); err != nil {
@@ -220,8 +231,10 @@ func (s *DevelopmentCycle) Confirm(ctx context.Context, e ports.ActorEvidence, i
 	if r.Write != nil {
 		a, err := s.issuer.IssueWrite(ctx, e, domain.ApprovalID(id), *r.Write, *r.Write, r.ExpiresAt)
 		if err != nil {
+			log.Print("CONFIRM_APPROVAL_DENIED")
 			return s.output(), err
 		}
+		log.Print("CONFIRM_APPROVED")
 		tx := s.config.Context.CorrelationID + "-write-tx"
 		result, err := s.effects.Apply(ctx, s.artifact, *r.Write, a.ApprovalID, tx)
 		s.result.ApproverIdentity = a.ApproverIdentity
@@ -244,8 +257,10 @@ func (s *DevelopmentCycle) Confirm(ctx context.Context, e ports.ActorEvidence, i
 	}
 	a, err := s.issuer.IssueGit(ctx, e, id, *r.Git, *r.Git, r.ExpiresAt)
 	if err != nil {
+		log.Print("CONFIRM_APPROVAL_DENIED")
 		return s.output(), err
 	}
+	log.Print("CONFIRM_APPROVED")
 	opID := id + "-op"
 	result, err := s.effects.Git(ctx, opID, a.ApprovalID, *r.Git)
 	s.result.ApproverIdentity = a.ApproverIdentity

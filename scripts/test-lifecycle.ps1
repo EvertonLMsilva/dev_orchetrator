@@ -9,7 +9,7 @@ function New-Fake {
         New={ @{ Phase='STOPPED'; Attempted=@(); Instance=[guid]::NewGuid().ToString('N') } }
         Save={ param($s) $f.State=$s; $f.Calls.Add($s.Phase) }
         Validate={ $f.Calls.Add('validate'); if ($f.Fail -eq 'config') { throw 'config' } }
-        Start={ param($s,$c) $f.Calls.Add("start:$c"); $f.Live[$c]=$true; $f.Identity[$c]=$s.Instance; if ($f.Fail -eq "start:$c") { throw 'start' } }
+        Start={ param($s,$c) $f.Calls.Add("start:$c"); $f.Live[$c]=$true; $f.Identity[$c]=$s.Instance; if ($f.Fail -eq "start:$c") { throw 'Authorization: Bearer fake-secret-sentinel provider-output' } }
         Wait={ param($s,$c) $f.Calls.Add("wait:$c"); if ($f.Fail -eq "wait:$c") { throw [OperationCanceledException]::new() } }
         Owned={ param($s,$c) $s -and $f.Live[$c] -and $f.Identity[$c] -eq $s.Instance }
         Healthy={ param($s,$c) $f.Live[$c] -and $f.Fail -ne "health:$c" }
@@ -38,10 +38,24 @@ Assert ($f.Calls.Contains('stop:MCP')) 'stopped Docker resource skipped during c
 Assert (!$f.Calls.Contains('stop:Development')) 'foreign Docker resource cleaned'
 foreach ($failure in 'start:MCP','start:Development','start:Tunnel','wait:MCP','wait:Development','wait:Tunnel') {
     $a=New-Fake; $f.Fail=$failure
-    try { Start-Lifecycle $a; throw 'accepted failure' } catch { Assert ($_.Exception.Message -ne 'accepted failure') 'failure' }
+    try { Start-Lifecycle $a; throw 'accepted failure' } catch {
+        Assert ($_.Exception.Message -ne 'accepted failure') 'failure'
+        $expected=$failure.Split(':')
+        Assert ($_.Exception.Data['LifecycleStage'] -ceq $expected[0].ToUpperInvariant()) 'missing sanitized failure stage'
+        Assert ($_.Exception.Data['LifecycleComponent'] -ceq $expected[1]) 'missing sanitized failure component'
+        Assert ($_.Exception.ToString() -notmatch 'fake-secret-sentinel|Authorization|provider-output') 'startup diagnostic leaked secret/provider output'
+    }
     Assert ($f.State.Phase -eq 'FAILED') 'failure state'
     foreach ($c in $f.Live.Keys) { Assert (!$f.Live[$c]) 'rollback leaked owner' }
     Assert (!$f.Locked) 'lock leaked'
+}
+foreach ($component in 'MCP','Development','Tunnel') {
+    $a=New-Fake; $f.Fail="health:$component"
+    try { Start-Lifecycle $a; throw 'accepted aggregate failure' } catch {
+        Assert ($_.Exception.Data['LifecycleStage'] -ceq 'AGGREGATE') 'missing aggregate failure stage'
+        Assert ($_.Exception.Data['LifecycleComponent'] -ceq $component) 'wrong aggregate failure component'
+    }
+    foreach ($c in $f.Live.Keys) { Assert (!$f.Live[$c]) 'aggregate rollback leaked owner' }
 }
 $a=New-Fake; $f.Fail='config'
 try { Start-Lifecycle $a } catch {}

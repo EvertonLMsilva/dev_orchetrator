@@ -11,6 +11,14 @@ Set-Content -LiteralPath (Join-Path $temp 'discord_token') -Value 'fake-only-cre
 $manifest=@{MCPConfig=(Join-Path $temp 'mcp.json');Workspace=$temp;SecuritySource=$temp;LocalPort=18089;TunnelExecutable=(Get-Command pwsh).Source;DevelopmentConfig=(Join-Path $temp 'development.json');DiscordTokenFile=(Join-Path $temp 'discord_token');DevelopmentVolume='test-development';RuntimeAuthVolume='test-auth'}
 $manifestFile=Join-Path $temp 'manifest.json'
 $manifest | ConvertTo-Json | Set-Content -LiteralPath $manifestFile
+$script:productionMCPTokenLoader=${function:Import-LifecycleMCPToken}
+[IO.File]::WriteAllText((Join-Path $temp 'client-token'),'fake-secret-sentinel')
+function Import-LifecycleMCPToken {
+    param($Path)
+    Assert ($Path -ceq (Join-Path $LifecycleRoot '.runtime/mcp-real/client-token')) 'wrong local MCP source'
+    # Run the production loader against a synthetic source, never real credentials.
+    & $script:productionMCPTokenLoader (Join-Path $temp 'client-token')
+}
 $global:p11Fake=@{Containers=@{};Calls=[Collections.Generic.List[string]]::new();Tunnel=$null;Failure=''}
 function Start-Job {
     param($ArgumentList,$ScriptBlock)
@@ -45,7 +53,7 @@ function Start-Job {
                 $service=if ($project.EndsWith('-mcp')) { 'orchestrator' } else { 'development' }
                 $container=@{Id=('{0:x64}' -f ($p11Fake.Containers.Count+1));Config=@{Labels=@{'com.docker.compose.project'=$project;'com.docker.compose.service'=$service}};State=@{Running=$true;Health=@{Status='healthy'}}}
                 $p11Fake.Containers[$project]=$container
-                if ($p11Fake.Failure -eq $service) { $code=1 }
+                if ($p11Fake.Failure -eq $service) { $code=1; $output='Authorization: Bearer fake-secret-sentinel provider-output' }
             }
             if ($a -contains 'stop' -and $p11Fake.Containers.ContainsKey($project)) { $p11Fake.Containers[$project].State.Running=$false }
         }
@@ -56,8 +64,22 @@ function Wait-Job { param($Job,$Timeout) $Job }
 function Receive-Job { param($Job) $Job }
 function Stop-Job { param($Job) }
 function Remove-Job { param($Job) }
-function Invoke-WebRequest { param($Uri,$TimeoutSec,$MaximumRedirection,[switch]$UseBasicParsing) @{StatusCode=200} }
-function Start-Sleep { param($Milliseconds) }
+function Invoke-WebRequest {
+    param($Uri,$TimeoutSec,$MaximumRedirection,[switch]$UseBasicParsing)
+    if ($Uri -match '/metrics$') { return @{StatusCode=200;Content="commands_poll_last_successful_timestamp_seconds $([DateTimeOffset]::UtcNow.ToUnixTimeSeconds())"} }
+    if ($Uri -match '/health\?details=true$') {
+        $status=if ($p11Fake.Failure -eq 'tunnel-health') { 'degraded' } else { 'ok' }
+        return @{StatusCode=200;Content=(@{live=$true;ready=$true;runtime=@{lifecycle='running'};components=@{'control-plane'=@{status=$status;state='polling';details=@{http_status=200;consecutive_failures=0}}}} | ConvertTo-Json -Depth 8)}
+    }
+    return @{StatusCode=200}
+}
+function Get-NetTCPConnection { param($OwningProcess,$State,$ErrorAction) @{LocalAddress='127.0.0.1';LocalPort=18091} }
+function Import-LifecycleEnvironment {
+    param($Path)
+    Assert ($Path -ceq (Join-Path $LifecycleRoot '.env')) 'startup did not select project root .env'
+    # This launcher double never reads the real project credentials.
+}
+function Start-Sleep { param($Milliseconds) if ($p11Fake.Failure -eq 'tunnel-health') { throw [OperationCanceledException]::new() } }
 function Start-Process {
     param($FilePath,$ArgumentList,$WindowStyle,$RedirectStandardOutput,$RedirectStandardError,[switch]$PassThru)
     $p11Fake.Calls.Add(($ArgumentList -join ' '))
@@ -74,13 +96,25 @@ function Get-Process { param($Id,$ErrorAction) if ($p11Fake.Tunnel -and !$p11Fak
 $saved=@{}
 foreach ($key in 'CONTROL_PLANE_API_KEY','MCP_CLIENT_TOKEN','CONTROL_PLANE_TUNNEL_ID') { $saved[$key]=[Environment]::GetEnvironmentVariable($key); [Environment]::SetEnvironmentVariable($key,'fake-secret-sentinel') }
 try {
-    foreach ($failure in '','orchestrator','development','tunnel') {
+    foreach ($failure in '','orchestrator','development','tunnel','tunnel-health') {
+        [Environment]::SetEnvironmentVariable('MCP_CLIENT_TOKEN',[NullString]::Value)
         $script:LifecycleDirectory=Join-Path $temp ('owner-'+[guid]::NewGuid().ToString('N'))
         $script:LifecycleFile=Join-Path $LifecycleDirectory 'owner.bin'
         $p11Fake.Containers.Clear(); $p11Fake.Calls.Clear(); $p11Fake.Tunnel=$null; $p11Fake.Failure=$failure
         $failed=$false
-        try { $result=Invoke-LifecycleCommand start $manifestFile } catch { $failed=$true; if (!$failure) { throw } }
+        $startupManifest=if (!$failure) { './manifest.json' } else { $manifestFile }
+        if (!$failure) { Assert (![IO.Path]::IsPathFullyQualified($startupManifest)) 'relative manifest fixture must remain relative' }
+        if (!$failure) { Push-Location $temp }
+        try { $result=Invoke-LifecycleCommand start $startupManifest } catch {
+            $failed=$true; if (!$failure) { throw }
+            $expectedComponent=switch ($failure) { orchestrator { 'MCP' }; development { 'Development' }; default { 'Tunnel' } }
+            $expectedStage=if ($failure -eq 'tunnel-health') { 'WAIT' } else { 'START' }
+            Assert ($_.Exception.Data['LifecycleStage'] -ceq $expectedStage -and $_.Exception.Data['LifecycleComponent'] -ceq $expectedComponent) 'wrong sanitized startup diagnosis'
+            if ($failure -in 'orchestrator','development') { Assert ($_.Exception.Data['DockerExitCode'] -eq 1) 'missing Docker exit code' }
+            Assert ($_.Exception.ToString() -notmatch 'fake-secret-sentinel|Authorization|provider-output') 'startup diagnostic leaked secret'
+        } finally { if (!$failure) { Pop-Location } }
         Assert ($failed -eq [bool]$failure) 'wrong startup outcome'
+        Assert ($null -eq [Environment]::GetEnvironmentVariable('MCP_CLIENT_TOKEN')) 'startup leaked materialized token into caller environment'
         $state=Read-LifecycleState
         if (!$failure) {
             Assert ($result -eq 'READY' -and $state.Phase -eq 'READY') 'not READY'
@@ -113,6 +147,14 @@ try {
         Assert (($p11Fake.Calls -join ',') -notmatch 'fake-secret-sentinel|volume rm|prune|--volumes') 'secret/data contract'
         $decoded=[Text.Encoding]::UTF8.GetString([Security.Cryptography.ProtectedData]::Unprotect([IO.File]::ReadAllBytes($LifecycleFile),[Text.Encoding]::UTF8.GetBytes($LifecycleRoot),[Security.Cryptography.DataProtectionScope]::CurrentUser))
         Assert ($decoded -notmatch 'fake-secret-sentinel|Authorization|auth.json|grants.json|discord_token') 'secret in metadata'
+    }
+    foreach ($key in 'CONTROL_PLANE_API_KEY','MCP_CLIENT_TOKEN','CONTROL_PLANE_TUNNEL_ID') {
+        [Environment]::SetEnvironmentVariable($key,'')
+        try { Invoke-LifecycleCommand start $manifestFile; throw 'accepted missing prerequisite' } catch {
+            Assert ($_.Exception.Data['LifecycleStage'] -ceq 'VALIDATE') 'wrong prerequisite failure stage'
+            Assert ($_.Exception.Data['LifecyclePrerequisite'] -ceq $key) 'missing sanitized prerequisite name'
+            Assert ($_.Exception.ToString() -notmatch 'fake-secret-sentinel|Authorization') 'prerequisite diagnostic leaked secret'
+        } finally { [Environment]::SetEnvironmentVariable($key,'fake-secret-sentinel') }
     }
 } finally { foreach ($key in $saved.Keys) { [Environment]::SetEnvironmentVariable($key,$saved[$key]) } }
 Write-Output 'P11.2 production launcher doubles PASS (test evidence retained in temp)'

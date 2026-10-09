@@ -26,27 +26,35 @@ function Stop-LifecycleComponents($State, $Adapter) {
     if ($failed) { throw 'Lifecycle shutdown incomplete' }
 }
 function Start-Lifecycle($Adapter) {
-    $lock = & $Adapter.Lock
+    $stage='LOCK'; $component='Lifecycle'; $lock=$null
     try {
+        $lock = & $Adapter.Lock
+        $stage='LOAD'
         $previous = & $Adapter.Load
+        $stage='PRECHECK'
         if ($previous -and $previous.Phase -in 'STARTING','STOPPING') { throw 'Interrupted lifecycle requires owned shutdown first' }
         if ((Get-LifecycleStatus $previous $Adapter) -ne 'STOPPED') { throw 'Lifecycle already managed; stop before starting' }
-        & $Adapter.Validate
+        $stage='VALIDATE'; & $Adapter.Validate
+        $stage='NEW'
         $state = & $Adapter.New
         $complete = $false
         try {
-            $state.Phase = 'STARTING'; & $Adapter.Save $state
+            $stage='SAVE'; $state.Phase = 'STARTING'; & $Adapter.Save $state
             foreach ($component in 'MCP','Development','Tunnel') {
                 # Durable intent permits inspection of a partially created resource.
-                $state.Attempted += $component; & $Adapter.Save $state
+                $stage='SAVE'; $state.Attempted += $component; & $Adapter.Save $state
+                $stage='START'
                 & $Adapter.Start $state $component
+                $stage='SAVE'
                 & $Adapter.Save $state
+                $stage='WAIT'
                 & $Adapter.Wait $state $component
             }
             foreach ($component in 'MCP','Development','Tunnel') {
+                $stage='AGGREGATE'
                 if (!(& $Adapter.Owned $state $component) -or !(& $Adapter.Healthy $state $component)) { throw 'Aggregate readiness failed' }
             }
-            $state.Phase = 'READY'; & $Adapter.Save $state
+            $stage='SAVE'; $component='Lifecycle'; $state.Phase = 'READY'; & $Adapter.Save $state
             $complete = $true
             return 'READY'
         } finally {
@@ -55,7 +63,16 @@ function Start-Lifecycle($Adapter) {
                 try { & $Adapter.Save $state } finally { Stop-LifecycleComponents $state $Adapter }
             }
         }
-    } finally { $lock.Dispose() }
+    } catch {
+        # No inner exception, provider output, arguments, headers or credentials.
+        $failure=[InvalidOperationException]::new("Lifecycle startup failed: stage=$stage component=$component")
+        $failure.Data['LifecycleStage']=$stage
+        $failure.Data['LifecycleComponent']=$component
+        $prerequisite=$_.Exception.Data['LifecyclePrerequisite']
+        if ($prerequisite -in 'CONTROL_PLANE_API_KEY','MCP_CLIENT_TOKEN','CONTROL_PLANE_TUNNEL_ID') { $failure.Data['LifecyclePrerequisite']=$prerequisite }
+        if ($_.Exception.Data['DockerExitCode'] -is [int]) { $failure.Data['DockerExitCode']=$_.Exception.Data['DockerExitCode'] }
+        throw $failure
+    } finally { if ($lock) { $lock.Dispose() } }
 }
 function Stop-Lifecycle($Adapter) {
     $lock = & $Adapter.Lock

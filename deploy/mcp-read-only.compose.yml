@@ -42,6 +42,10 @@ services:
       interval: 10s
       timeout: 5s
       retries: 3
+networks:
+  default:
+    external: true
+    name: ${MCP_NETWORK_NAME:-dev-orchestrator-mcp_default}
 volumes:
   security:
     external: true

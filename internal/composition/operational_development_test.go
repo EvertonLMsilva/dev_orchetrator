@@ -83,6 +83,8 @@ func TestOperationalConcurrentBeginSingleWriter(t *testing.T) {
 
 type operationalGenerator struct {
 	target    string
+	content   string
+	calls     int
 	denyTools bool
 	proved    bool
 }
@@ -95,6 +97,7 @@ func (g *operationalGenerator) ProveToolFree(context.Context) error {
 	return nil
 }
 func (g *operationalGenerator) Generate(_ context.Context, r ports.CandidateGenerationRequest) ([]byte, error) {
+	g.calls++
 	if !g.proved || g.denyTools {
 		return nil, errors.New("unproved generation")
 	}
@@ -103,6 +106,9 @@ func (g *operationalGenerator) Generate(_ context.Context, r ports.CandidateGene
 		r.WriteTargets[0] = g.target
 	}
 	data := []byte("safe\n")
+	if g.content != "" {
+		data = []byte(g.content)
+	}
 	return json.Marshal(domain.StructuredProposal{SchemaVersion: 1, Edits: []domain.StructuredEdit{{Operation: domain.WriteCreate, Target: g.target, PostimageContent: base64.StdEncoding.EncodeToString(data), PostimageIdentity: domain.CandidateDigest(data)}}})
 }
 
@@ -260,7 +266,7 @@ func operationalStart(t *testing.T, c OperationalDevelopmentConfig, p ports.Plan
 	return s
 }
 func operationalInput(c OperationalDevelopmentConfig, i int, action, text string) application.ConversationInput {
-	return application.ConversationInput{Source: c.Registry.Routes[i].Source, Actor: c.Mappings[0].Evidence, DevelopmentAction: action, Text: text}
+	return application.ConversationInput{Source: c.Registry.Routes[i].Source, Actor: c.Mappings[0].Evidence, DevelopmentAction: action, Text: text, RequestedWriteTargets: append([]string(nil), c.Registry.Projects[i].Development.Policy.WriteTargets...)}
 }
 func operationalRecord(t *testing.T, s *OperationalDevelopmentService, project domain.ProjectID) operationalCycleRecord {
 	t.Helper()
@@ -508,5 +514,118 @@ func TestOperationalInterruptedSnapshotPreservesCommittedTerminals(t *testing.T)
 	}
 	if !preserved {
 		t.Fatal("lost interrupted evidence")
+	}
+}
+
+// Explicit user targets are constraints, never project authorization.
+func TestOperationalDevelopmentIntentIntegrity(t *testing.T) {
+	for _, scenario := range []string{"outside-policy", "allowed", "substitution", "missing", "duplicate", "case-mismatch"} {
+		t.Run(scenario, func(t *testing.T) {
+			c := operationalFixture(t)
+			c.Registry.Projects[0].ID = "alpha"
+			c.Registry.Projects[0].Name = "alpha"
+			c.Registry.Routes[0].ProjectID = "alpha"
+			for i := range c.Grants {
+				if c.Grants[i].ProjectID == "a" {
+					c.Grants[i].ProjectID = "alpha"
+				}
+			}
+			g := &operationalGenerator{target: "note.txt", content: "P11.3 ISOLATION TEST."}
+			requested := []string{"note.txt"}
+			switch scenario {
+			case "outside-policy":
+				requested = []string{"summary.txt"}
+			case "substitution":
+				c.Registry.Projects[0].Development.Policy.WriteTargets = []string{"note.txt", "other.txt"}
+				g.target = "other.txt"
+			case "missing":
+				requested = nil
+			case "duplicate":
+				requested = []string{"note.txt", "note.txt"}
+			case "case-mismatch":
+				requested = []string{"Note.txt"}
+			}
+			s := operationalStart(t, c, developmentPlanner{}, g)
+			in := operationalInput(c, 0, "begin", "Crie summary.txt com o texto P11.3 ISOLATION TEST.")
+			if scenario == "allowed" {
+				in.Text = "Crie note.txt com o texto P11.3 ISOLATION TEST."
+			}
+			in.RequestedWriteTargets = requested
+			response := s.Handle(context.Background(), in)
+			record := operationalRecord(t, s, "alpha")
+			out := record.Output
+			if scenario == "allowed" {
+				if g.calls != 1 || out.Review == nil || out.Review.Files["note.txt"] != "P11.3 ISOLATION TEST." {
+					t.Fatal("positive generation failed", out)
+				}
+				if response.Status != "REVIEW_REQUIRED" || !g.proved || out.Review == nil || out.Review.Operation != "WRITE_APPLY" {
+					t.Fatal(response, out)
+				}
+			} else {
+				if response.Status != "REJECTED" || out.Result.TaskState != domain.TaskStatusBlocked || out.Review != nil {
+					t.Fatal("intent gate failed", response, out)
+				}
+				in.DevelopmentAction = "confirm"
+				in.Confirmation = "forged-review"
+				if s.Handle(context.Background(), in).Status != "REJECTED" {
+					t.Fatal("denied cycle offered approval")
+				}
+				if scenario == "substitution" && g.calls != 1 {
+					t.Fatal("post-generation case not exercised")
+				}
+				if scenario != "substitution" && (g.proved || g.calls != 0) {
+					t.Fatal("candidate executed before authorization")
+				}
+				if scenario != "substitution" {
+					entries, err := os.ReadDir(c.Registry.Projects[0].Workspace)
+					if err != nil || len(entries) != 0 {
+						t.Fatal("bootstrap effect before intent gate", entries, err)
+					}
+				}
+			}
+			if out.Result.WriteTransaction != "" || out.Result.Branch != "" || out.Result.CommitOID != "" {
+				t.Fatal("unexpected effect", out)
+			}
+			err := filepath.Walk(c.Registry.Projects[0].Workspace, func(path string, info os.FileInfo, err error) error {
+				if err != nil {
+					return err
+				}
+				if !info.IsDir() && (info.Name() == "note.txt" || info.Name() == "other.txt" || info.Name() == "summary.txt") {
+					t.Fatal("filesystem effect", path)
+				}
+				return nil
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+
+		})
+	}
+}
+
+func TestOperationalDeniedIntentSurvivesRestartWithoutBootstrap(t *testing.T) {
+	c := operationalFixture(t)
+	plannerCalls := 0
+	planner := developmentPlanner{fail: func() error { plannerCalls++; return errors.New("planner must not run for denied targets") }}
+	g := &operationalGenerator{target: "note.txt"}
+	s := operationalStart(t, c, planner, g)
+	in := operationalInput(c, 0, "begin", "create summary.txt")
+	in.RequestedWriteTargets = []string{"summary.txt"}
+	if s.Handle(context.Background(), in).Status != "REJECTED" {
+		t.Fatal("not denied")
+	}
+	record := operationalRecord(t, s, "a")
+	if err := s.Shutdown(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	restarted := operationalStart(t, c, planner, g)
+	in.DevelopmentAction = "status"
+	in.Confirmation = record.CorrelationID
+	if restarted.Handle(context.Background(), in).Status != "BLOCKED" || plannerCalls != 0 || g.proved || g.calls != 0 {
+		t.Fatal("denial resumed")
+	}
+	entries, err := os.ReadDir(c.Registry.Projects[0].Workspace)
+	if err != nil || len(entries) != 0 {
+		t.Fatal("denial provisioned workspace", entries, err)
 	}
 }

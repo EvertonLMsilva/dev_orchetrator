@@ -18,6 +18,7 @@ import (
 	"fmt"
 	"golang.org/x/sys/unix"
 	"io"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -391,10 +392,12 @@ func (s *OperationalDevelopmentService) Handle(ctx context.Context, in applicati
 	}
 	project, err := s.routes.Resolve(ctx, in.Source)
 	if err != nil {
+		log.Print("ROUTE_DENIED")
 		return denied
 	}
 	principal, err := s.authority.AuthenticateActor(ctx, in.Actor)
 	if err != nil {
+		log.Print("AUTHENTICATION_DENIED")
 		return denied
 	}
 	if in.DevelopmentAction == "status" {
@@ -429,6 +432,19 @@ func (s *OperationalDevelopmentService) Handle(ctx context.Context, in applicati
 		}
 		p := s.projects[project]
 		r := operationalCycleRecord{ProjectID: project, TaskID: domain.TaskID("task-" + key), CorrelationID: key, Branch: p.Development.BranchPrefix + key, PrincipalID: principal.ID, ConfigIdentity: operationalProjectIdentity(p), Source: in.Source, RecoveryRequired: true, Output: application.DevelopmentOutput{Result: application.DevelopmentResult{ProjectID: project, TaskID: domain.TaskID("task-" + key), CorrelationID: key}}}
+		// Deny explicit user targets before provisioning any workspace or Git repository.
+		intent := application.DevelopmentIntent{Objective: in.Text, RequestedWriteTargets: in.RequestedWriteTargets}
+		if intent.ValidateWriteTargets(p.Development.Policy) != nil {
+			log.Print("TARGET_DENIED")
+			r.RecoveryRequired = false
+			r.Output.Result.TaskState = domain.TaskStatusBlocked
+			s.records[key] = r
+			if s.save() != nil {
+				s.stopped = true
+				return application.ConversationResponse{Status: "BLOCKED", Message: "Persistência bloqueada."}
+			}
+			return application.ConversationResponse{Status: "REJECTED", Message: "Targets solicitados negados. Referência: " + key}
+		}
 		s.records[key] = r
 		if s.save() != nil {
 			s.stopped = true
@@ -436,6 +452,7 @@ func (s *OperationalDevelopmentService) Handle(ctx context.Context, in applicati
 		}
 		cycle, err := s.factory(ctx, r)
 		if err != nil {
+			log.Print("BOOTSTRAP_DENIED")
 			r.Output.Result.TaskState = domain.TaskStatusBlocked
 			r.Output.Result.PlannerFailureStage = "BOOTSTRAP"
 			r.RecoveryRequired = false
@@ -449,10 +466,14 @@ func (s *OperationalDevelopmentService) Handle(ctx context.Context, in applicati
 	} else if in.DevelopmentAction != "confirm" && in.DevelopmentAction != "cancel" {
 		return denied
 	} else if key == "" {
+		if in.DevelopmentAction == "confirm" {
+			log.Print("CONFIRM_LOOKUP_DENIED")
+		}
 		return denied
 	}
 	r := s.records[key]
 	if in.DevelopmentAction == "confirm" && (r.Output.Review == nil || in.Confirmation != r.Output.Review.Identity) {
+		log.Print("CONFIRM_LOOKUP_DENIED")
 		return denied
 	}
 	// Durable intent BEFORE invoking any cycle operation. A crash never resumes.

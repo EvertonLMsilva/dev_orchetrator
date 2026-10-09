@@ -60,7 +60,7 @@ func (w *candidateWorkspaceDouble) Extract(context.Context, domain.CandidateCont
 }
 func (w *candidateWorkspaceDouble) Close() error { w.closed++; return w.closeErr }
 func pipelineCandidateRequest() application.CandidateRequest {
-	return application.CandidateRequest{Context: domain.CandidateContext{ProjectID: "p", TaskID: "t", CorrelationID: "c"}, Objective: "edit", SourceRoot: "/real", WorkspaceIdentity: "registered", Timeout: time.Second, Policy: domain.CandidatePolicy{InputTargets: []string{"a"}, WriteTargets: []string{"a"}, Limits: domain.CandidateLimits{MaxOperations: 1, MaxFileBytes: 1024, MaxTotalBytes: 1024, MaxPathBytes: 256, MaxOutputBytes: 4096}}}
+	return application.CandidateRequest{Context: domain.CandidateContext{ProjectID: "p", TaskID: "t", CorrelationID: "c"}, Objective: "edit", RequestedWriteTargets: []string{"a"}, SourceRoot: "/real", WorkspaceIdentity: "registered", Timeout: time.Second, Policy: domain.CandidatePolicy{InputTargets: []string{"a"}, WriteTargets: []string{"a"}, Limits: domain.CandidateLimits{MaxOperations: 1, MaxFileBytes: 1024, MaxTotalBytes: 1024, MaxPathBytes: 256, MaxOutputBytes: 4096}}}
 }
 func TestCandidatePipelineToolsAndFailureLifecycle(t *testing.T) {
 	injected := errors.New("injected failure")
@@ -213,6 +213,54 @@ func TestCandidateRealCopyMaliciousAndCancelledGenerators(t *testing.T) {
 			content, _ := os.ReadFile(filepath.Join(source, "a"))
 			if string(content) != "old" {
 				t.Fatal("malicious generator changed real bytes")
+			}
+		})
+	}
+}
+
+func TestCandidatePipelineStructuredTargetsGate(t *testing.T) {
+	for _, scenario := range []string{"outside-policy", "missing", "substitution", "artifact-outside-policy", "allowed", "generator-mutation"} {
+		t.Run(scenario, func(t *testing.T) {
+			r := pipelineCandidateRequest()
+			w := &candidateWorkspaceDouble{artifact: testPipelineArtifact(t)}
+			f := &candidateFactoryDouble{w: w}
+			g := &candidateGeneratorDouble{generate: func(_ context.Context, q ports.CandidateGenerationRequest) ([]byte, error) {
+				if scenario == "generator-mutation" {
+					q.WriteTargets[0] = "attacker"
+				}
+				return []byte("proposal"), nil
+			}}
+			switch scenario {
+			case "outside-policy":
+				r.RequestedWriteTargets = []string{"summary.txt"}
+			case "missing":
+				r.RequestedWriteTargets = nil
+			case "substitution":
+				r.Policy.WriteTargets = []string{"a", "b"}
+				r.RequestedWriteTargets = []string{"b"}
+			case "artifact-outside-policy":
+				r.Policy.WriteTargets = []string{"b"}
+				r.RequestedWriteTargets = []string{"b"}
+			}
+			a, err := application.NewCandidatePipeline(g, f).Generate(context.Background(), r)
+			if scenario == "allowed" || scenario == "generator-mutation" {
+				if err != nil || a.Candidate().Validate() != nil {
+					t.Fatal(a, err)
+				}
+			} else {
+				if !errors.Is(err, domain.ErrCandidateDenied) || len(a.Candidate().Manifest.Entries) != 0 {
+					t.Fatal("artifact escaped", a, err)
+				}
+			}
+			if scenario == "outside-policy" || scenario == "missing" {
+				if g.calls != 0 || f.calls != 0 || w.writes != 0 {
+					t.Fatal("pre-generation effects")
+				}
+			} else if g.calls != 1 || w.closed != 1 {
+				t.Fatal("generation or cleanup missing")
+			}
+			if scenario == "generator-mutation" && r.RequestedWriteTargets[0] != "a" {
+				t.Fatal("generator changed intent")
 			}
 		})
 	}

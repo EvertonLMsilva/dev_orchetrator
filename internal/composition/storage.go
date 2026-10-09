@@ -33,6 +33,7 @@ type auditRecord struct {
 type auditStore struct {
 	mu      sync.Mutex
 	root    *os.Root
+	release func() error
 	records []auditRecord
 }
 
@@ -42,13 +43,13 @@ func openAudit(dir string) (*auditStore, error) {
 		return nil, ErrStorage
 	}
 	a := &auditStore{root: root, records: []auditRecord{}}
-	// Exclusive instance lease is retained after an unclean stop. Recovery is
-	// explicit and must first prove there are no active operations.
-	if e = root.Mkdir("instance.lock", 0700); e != nil {
+	release, e := acquireInstanceLease(root)
+	if e != nil {
 		root.Close()
 		return nil, ErrStorage
 	}
-	fail := func() (*auditStore, error) { root.Remove("instance.lock"); root.Close(); return nil, ErrStorage }
+	a.release = release
+	fail := func() (*auditStore, error) { a.close(); return nil, ErrStorage }
 	if _, e := root.Lstat("audit.pending"); !errors.Is(e, os.ErrNotExist) {
 		return fail()
 	}
@@ -200,7 +201,7 @@ func (a *auditStore) close() error {
 	if a.root == nil {
 		return nil
 	}
-	e := a.root.Remove("instance.lock")
+	e := a.release()
 	closeErr := a.root.Close()
 	a.root = nil
 	if e != nil || closeErr != nil {

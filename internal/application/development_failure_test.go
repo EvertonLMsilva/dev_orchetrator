@@ -66,8 +66,8 @@ func TestDevelopmentBeginFailurePersistsBlockAfterCancellation(t *testing.T) {
 					}
 					return ports.NewPlannerFailure(stage, errors.New("SECRET_PROVIDER"))
 				})
-				cycle := &DevelopmentCycle{config: DevelopmentCycleConfig{Context: domain.CandidateContext{ProjectID: "pilot", TaskID: "task", CorrelationID: "corr"}, Timeout: 20 * time.Millisecond}, tasks: store, auth: failureActor{}, planner: NewCandidatePlanningOrchestrator(NewContextBuilder(projects, store), p), result: DevelopmentResult{ProjectID: "pilot", TaskID: "task", CorrelationID: "corr"}}
-				out, err := cycle.Begin(ctx, ports.ActorEvidence{Provider: "discord", ExternalID: "123"}, "create note.txt")
+				cycle := &DevelopmentCycle{config: DevelopmentCycleConfig{Context: domain.CandidateContext{ProjectID: "pilot", TaskID: "task", CorrelationID: "corr"}, Timeout: 20 * time.Millisecond, Policy: domain.CandidatePolicy{WriteTargets: []string{"note.txt"}, Limits: domain.CandidateLimits{MaxOperations: 1, MaxFileBytes: 1024, MaxTotalBytes: 1024, MaxPathBytes: 256, MaxOutputBytes: 4096}}}, tasks: store, auth: failureActor{}, planner: NewCandidatePlanningOrchestrator(NewContextBuilder(projects, store), p), result: DevelopmentResult{ProjectID: "pilot", TaskID: "task", CorrelationID: "corr"}}
+				out, err := cycle.Begin(ctx, ports.ActorEvidence{Provider: "discord", ExternalID: "123"}, DevelopmentIntent{Objective: "create note.txt", RequestedWriteTargets: []string{"note.txt"}})
 				var failure *ports.PlannerFailure
 				if err == nil || !errors.As(err, &failure) || failure.FailureStage() != stage || out.Review != nil || !cycle.terminal {
 					t.Fatal("planner failure lost", out, err)
@@ -81,6 +81,23 @@ func TestDevelopmentBeginFailurePersistsBlockAfterCancellation(t *testing.T) {
 					t.Fatal("healthy store not blocked", out, err)
 				}
 			})
+		}
+	}
+}
+
+func TestDevelopmentCycleDeniesTargetsBeforePlannerOrCandidate(t *testing.T) {
+	for _, requested := range [][]string{nil, {}, {"summary.txt"}, {"note.txt", "note.txt"}} {
+		ctx := context.Background()
+		tasks := memory.NewTaskRepository()
+		if err := tasks.Save(ctx, domain.Task{ID: "task", ProjectID: "alpha", Title: "trusted", Status: domain.TaskStatusAnalyzing}); err != nil {
+			t.Fatal(err)
+		}
+		// Nil Planner and Candidate deliberately ensure this gate executes before either capability.
+		cycle := &DevelopmentCycle{config: DevelopmentCycleConfig{Context: domain.CandidateContext{ProjectID: "alpha", TaskID: "task", CorrelationID: "corr"}, Policy: domain.CandidatePolicy{WriteTargets: []string{"note.txt"}, Limits: domain.CandidateLimits{MaxOperations: 1, MaxFileBytes: 1024, MaxTotalBytes: 1024, MaxPathBytes: 256, MaxOutputBytes: 4096}}}, tasks: tasks, auth: failureActor{}}
+		out, err := cycle.Begin(ctx, ports.ActorEvidence{Provider: "discord", ExternalID: "123"}, DevelopmentIntent{Objective: "Crie summary.txt com o texto P11.3 ISOLATION TEST.", RequestedWriteTargets: requested})
+		task, _, _ := tasks.FindByID(ctx, "task")
+		if !errors.Is(err, domain.ErrWriteDenied) || out.Review != nil || out.Result.TaskState != domain.TaskStatusBlocked || task.Status != domain.TaskStatusBlocked || out.Result.WriteTransaction != "" || out.Result.Branch != "" || out.Result.CommitOID != "" {
+			t.Fatal("intent denial lost", out, err)
 		}
 	}
 }
