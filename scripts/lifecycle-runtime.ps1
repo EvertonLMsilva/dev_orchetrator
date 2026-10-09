@@ -184,7 +184,7 @@ function Test-LifecycleHealthy($s,$c) {
             $http=[int]$metrics.StatusCode
             if ($metrics.StatusCode -ne 200 -or $metrics.Content.Length -gt 262144) { return (Set-TunnelReadinessRejection 'MetricsResponse' $http) }
             $condition='MetricsContract'
-            $success=@([regex]::Matches($metrics.Content,'(?m)^commands_poll_last_successful_timestamp_seconds(?:\{[^\r\n}]*\})?\s+([0-9]+(?:\.[0-9]+)?)\s*$'))
+            $success=@([regex]::Matches($metrics.Content,'(?m)^commands_poll_last_successful_timestamp_seconds(?:\{[^\r\n}]*\})?\s+([0-9]+(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?)\s*$'))
             if ($success.Count -ne 1) { return (Set-TunnelReadinessRejection 'SuccessfulPollMetricCount' $http) }
             $stamp=[double]::Parse($success[0].Groups[1].Value,[Globalization.CultureInfo]::InvariantCulture)
             $started=([DateTimeOffset]$p.StartTime.ToUniversalTime()).ToUnixTimeSeconds()
@@ -354,7 +354,9 @@ function Invoke-LifecycleCommand([string]$Command,[string]$Manifest) {
                 Invoke-Docker @('compose','-p',(Get-LifecycleProject $s $c),'-f',"$LifecycleRoot/deploy/development.compose.yml",'up','-d','--no-build','development') 60 | Out-Null
             } else {
                 $env:MCP_RUNTIME_AUTHORIZATION='Bearer '+$env:MCP_CLIENT_TOKEN
-                $arguments=@('run','--control-plane.api-key','env:CONTROL_PLANE_API_KEY','--health.listen-addr','127.0.0.1:0','--mcp.server-url',"http://127.0.0.1:$($s.Port)/mcp",'--mcp.extra-headers','"Authorization: env:MCP_RUNTIME_AUTHORIZATION"','--mcp.discovery-extra-headers','"Authorization: env:MCP_RUNTIME_AUTHORIZATION"','--mcp.startup-wait-timeout','30s','--log.http-raw-unsafe=false','--log.file','stdout','--log.level','error','--log.format','struct-text')
+                # A quiet first long-poll must return inside the existing readiness window.
+                # This flag shortens only the first requested wait, not normal polling or its deadline.
+                $arguments=@('run','--control-plane.api-key','env:CONTROL_PLANE_API_KEY','--control-plane.initial-poll-timeout','5s','--health.listen-addr','127.0.0.1:0','--mcp.server-url',"http://127.0.0.1:$($s.Port)/mcp",'--mcp.extra-headers','"Authorization: env:MCP_RUNTIME_AUTHORIZATION"','--mcp.discovery-extra-headers','"Authorization: env:MCP_RUNTIME_AUTHORIZATION"','--mcp.startup-wait-timeout','30s','--log.http-raw-unsafe=false','--log.file','stdout','--log.level','error','--log.format','struct-text')
                 $p=Start-Process -FilePath $ManifestData.TunnelExecutable -ArgumentList $arguments -WindowStyle Hidden -RedirectStandardOutput 'NUL' -RedirectStandardError '\\.\NUL' -PassThru
                 try {
                     $s.Tunnel=@{Pid=$p.Id;Started=$p.StartTime.ToUniversalTime().Ticks.ToString();Executable=$p.MainModule.FileName}
