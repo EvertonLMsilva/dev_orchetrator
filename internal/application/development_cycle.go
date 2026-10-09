@@ -6,6 +6,7 @@ import (
 	"dev-orchestrator/internal/ports"
 	"encoding/json"
 	"errors"
+	"log"
 	"sync"
 	"time"
 )
@@ -214,7 +215,12 @@ func (s *DevelopmentCycle) Begin(ctx context.Context, e ports.ActorEvidence, int
 func (s *DevelopmentCycle) Confirm(ctx context.Context, e ports.ActorEvidence, identity string) (DevelopmentOutput, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.terminal || s.pending == nil || identity != s.pending.Identity || !s.now().Before(s.pending.ExpiresAt) {
+	if s.terminal || s.pending == nil || identity != s.pending.Identity {
+		log.Print("CONFIRM_LOOKUP_DENIED")
+		return s.output(), domain.ErrWriteDenied
+	}
+	if !s.now().Before(s.pending.ExpiresAt) {
+		log.Print("CONFIRM_EXPIRED")
 		return s.output(), domain.ErrWriteDenied
 	}
 	if err := ctx.Err(); err != nil {
@@ -225,8 +231,10 @@ func (s *DevelopmentCycle) Confirm(ctx context.Context, e ports.ActorEvidence, i
 	if r.Write != nil {
 		a, err := s.issuer.IssueWrite(ctx, e, domain.ApprovalID(id), *r.Write, *r.Write, r.ExpiresAt)
 		if err != nil {
+			log.Print("CONFIRM_APPROVAL_DENIED")
 			return s.output(), err
 		}
+		log.Print("CONFIRM_APPROVED")
 		tx := s.config.Context.CorrelationID + "-write-tx"
 		result, err := s.effects.Apply(ctx, s.artifact, *r.Write, a.ApprovalID, tx)
 		s.result.ApproverIdentity = a.ApproverIdentity
@@ -249,8 +257,10 @@ func (s *DevelopmentCycle) Confirm(ctx context.Context, e ports.ActorEvidence, i
 	}
 	a, err := s.issuer.IssueGit(ctx, e, id, *r.Git, *r.Git, r.ExpiresAt)
 	if err != nil {
+		log.Print("CONFIRM_APPROVAL_DENIED")
 		return s.output(), err
 	}
+	log.Print("CONFIRM_APPROVED")
 	opID := id + "-op"
 	result, err := s.effects.Git(ctx, opID, a.ApprovalID, *r.Git)
 	s.result.ApproverIdentity = a.ApproverIdentity

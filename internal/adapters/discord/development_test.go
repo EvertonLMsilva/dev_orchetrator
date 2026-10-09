@@ -1,10 +1,13 @@
 package discord
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	sdk "github.com/disgoorg/disgo/discord"
 	"github.com/disgoorg/disgo/gateway"
+	"log"
+	"strings"
 	"testing"
 	"time"
 )
@@ -62,6 +65,10 @@ func TestDevelopmentActorComesFromEvent(t *testing.T) {
 func TestDevelopmentRejectsUnstructuredTargets(t *testing.T) {
 	for _, targets := range []string{"", `null`, `[]`, `note.txt`, `"note.txt"`, `["note.txt"] trailing`, `[1]`, `{ "WriteTargets": ["note.txt"] }`} {
 		t.Run(targets, func(t *testing.T) {
+			var diagnostic bytes.Buffer
+			previous := log.Writer()
+			log.SetOutput(&diagnostic)
+			t.Cleanup(func() { log.SetOutput(previous) })
 			r := &conversationREST{updated: make(chan struct{})}
 			h := &conversationHandler{entered: make(chan struct{}), release: make(chan struct{})}
 			close(h.release)
@@ -82,6 +89,12 @@ func TestDevelopmentRejectsUnstructuredTargets(t *testing.T) {
 			if err := g.handleInteraction(context.Background(), event); err != nil {
 				t.Fatal(err)
 			}
+			if r.responses != 1 || r.response.Type != sdk.InteractionResponseTypeCreateMessage || r.response.Data.(sdk.MessageCreate).Content != "Solicitação negada." {
+				t.Fatal("invalid targets rejected without Discord response")
+			}
+			if !strings.Contains(diagnostic.String(), "TARGET_PARSE_DENIED_") {
+				t.Fatal("target rejection does not identify a safe subcondition")
+			}
 			if err := g.Close(context.Background()); err != nil {
 				t.Fatal(err)
 			}
@@ -91,5 +104,44 @@ func TestDevelopmentRejectsUnstructuredTargets(t *testing.T) {
 			default:
 			}
 		})
+	}
+}
+
+func TestDevelopmentTargetsSDKRepresentation(t *testing.T) {
+	for _, target := range []string{"note.txt", "summary.txt"} {
+		var option sdk.SlashCommandOption
+		wire := `{"name":"targets","type":3,"value":"[\"` + target + `\"]"}`
+		if err := json.Unmarshal([]byte(wire), &option); err != nil {
+			t.Fatal(err)
+		}
+		if option.String() != `["`+target+`"]` {
+			t.Fatal("SDK string contract changed")
+		}
+		targets, reason := parseDevelopmentTargets(option, true)
+		if reason != "" || len(targets) != 1 || targets[0] != target {
+			t.Fatal("valid SDK string rejected", reason)
+		}
+	}
+	for _, c := range []struct {
+		value   string
+		kind    sdk.ApplicationCommandOptionType
+		present bool
+		reason  string
+	}{
+		{`"[]"`, 3, false, "MISSING"},
+		{`1`, 4, true, "WRONG_TYPE"},
+		{`["note.txt"]`, 3, true, "VALUE_DECODE"},
+		{`"not-json"`, 3, true, "ARRAY_DECODE"},
+		{`"[]"`, 3, true, "EMPTY_LIST"},
+		{`"[\"\"]"`, 3, true, "EMPTY_ELEMENT"},
+		{`"[null]"`, 3, true, "EMPTY_ELEMENT"},
+		{`"[1]"`, 3, true, "ARRAY_DECODE"},
+		{`"{\"targets\":[\"note.txt\"]}"`, 3, true, "ARRAY_DECODE"},
+		{`"` + strings.Repeat("x", 1025) + `"`, 3, true, "TOO_LARGE"},
+		{`"[` + strings.Repeat(`\"a\",`, 1024) + `\"a\"]"`, 3, true, "TOO_LARGE"},
+	} {
+		if targets, reason := parseDevelopmentTargets(sdk.SlashCommandOption{Type: c.kind, Value: json.RawMessage(c.value)}, c.present); targets != nil || reason != c.reason {
+			t.Fatal("unsafe/misclassified input", reason, c.reason)
+		}
 	}
 }

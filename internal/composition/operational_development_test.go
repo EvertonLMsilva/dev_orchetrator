@@ -605,8 +605,10 @@ func TestOperationalDevelopmentIntentIntegrity(t *testing.T) {
 
 func TestOperationalDeniedIntentSurvivesRestartWithoutBootstrap(t *testing.T) {
 	c := operationalFixture(t)
+	plannerCalls := 0
+	planner := developmentPlanner{fail: func() error { plannerCalls++; return errors.New("planner must not run for denied targets") }}
 	g := &operationalGenerator{target: "note.txt"}
-	s := operationalStart(t, c, developmentPlanner{}, g)
+	s := operationalStart(t, c, planner, g)
 	in := operationalInput(c, 0, "begin", "create summary.txt")
 	in.RequestedWriteTargets = []string{"summary.txt"}
 	if s.Handle(context.Background(), in).Status != "REJECTED" {
@@ -616,10 +618,10 @@ func TestOperationalDeniedIntentSurvivesRestartWithoutBootstrap(t *testing.T) {
 	if err := s.Shutdown(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	restarted := operationalStart(t, c, developmentPlanner{}, g)
+	restarted := operationalStart(t, c, planner, g)
 	in.DevelopmentAction = "status"
 	in.Confirmation = record.CorrelationID
-	if restarted.Handle(context.Background(), in).Status != "BLOCKED" || g.proved || g.calls != 0 {
+	if restarted.Handle(context.Background(), in).Status != "BLOCKED" || plannerCalls != 0 || g.proved || g.calls != 0 {
 		t.Fatal("denial resumed")
 	}
 	entries, err := os.ReadDir(c.Registry.Projects[0].Workspace)

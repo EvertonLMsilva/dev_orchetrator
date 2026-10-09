@@ -77,6 +77,11 @@ func run(ctx context.Context, args []string) (result error) {
 		oc, err = composition.LoadOperationalDevelopmentConfig(*configPath)
 	} else {
 		c, err = composition.LoadDevelopmentConfig(*configPath)
+		// Explicit registration has no runtime authority; validate either trusted
+		// schema without implicitly selecting operational mode for normal startup.
+		if err != nil && *register != "" {
+			_, err = composition.LoadOperationalDevelopmentConfig(*configPath)
+		}
 	}
 	if err != nil {
 		return err
