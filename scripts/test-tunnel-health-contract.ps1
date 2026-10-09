@@ -32,4 +32,14 @@ $health.components['control-plane'].details.consecutive_failures=0;$script:metri
 Assert (!(Test-LifecycleHealthy @{} Tunnel)) 'missing authenticated poll accepted'
 $script:metrics='commands_poll_last_successful_timestamp_seconds 1767225700';$health.components['control-plane'].details.http_status=200
 Assert (Test-LifecycleHealthy @{} Tunnel) 'explicit successful HTTP rejected'
+$script:metrics='commands_poll_last_successful_timestamp_seconds{otel_scope_name="controlplane",otel_scope_schema_url="",otel_scope_version=""} 1.7672257e+09'
+Assert (Test-LifecycleHealthy @{} Tunnel) 'real Prometheus scientific timestamp rejected'
+foreach($value in @('0','1.0e+09','9.0e+20','NaN','+Inf','1e','1e309')) {
+ $script:metrics="commands_poll_last_successful_timestamp_seconds $value"
+ Assert (!(Test-LifecycleHealthy @{} Tunnel)) "invalid/stale/future polling metric $value accepted"
+}
+$script:metrics="commands_poll_last_successful_timestamp_seconds 1767225700`ncommands_poll_last_successful_timestamp_seconds 1.7672257e+09"
+Assert (!(Test-LifecycleHealthy @{} Tunnel)) 'duplicate decimal/scientific polling metrics accepted'
+$script:metrics='commands_poll_last_successful_timestamp_seconds 1.7672257E+09'
+Assert (Test-LifecycleHealthy @{} Tunnel) 'uppercase scientific timestamp rejected'
 Write-Output 'Tunnel HealthContract PASS (runtime shape, mandatory fields, 401/403/degraded, authenticated polling)'

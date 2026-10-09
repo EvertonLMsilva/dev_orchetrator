@@ -10,6 +10,11 @@ $s=@{Port=18088}
 $tunnelArguments=& ([scriptblock]::Create($argumentAssignment.Right.Extent.Text))
 $formatIndex=[array]::IndexOf($tunnelArguments,'--log.format')
 Assert ($formatIndex -ge 0 -and $formatIndex+1 -lt $tunnelArguments.Count -and $tunnelArguments[$formatIndex+1] -ceq 'struct-text') 'Tunnel arguments must include --log.format struct-text'
+$initialPollIndex=[array]::IndexOf($tunnelArguments,'--control-plane.initial-poll-timeout')
+Assert ($initialPollIndex -ge 0 -and $tunnelArguments[$initialPollIndex+1] -ceq '5s') 'First authenticated poll must complete before the 30-second readiness deadline'
+Assert ($tunnelArguments -notcontains '--control-plane.poll-timeout') 'Steady-state long-poll timeout must remain unchanged'
+$startupWaitIndex=[array]::IndexOf($tunnelArguments,'--mcp.startup-wait-timeout')
+Assert ($startupWaitIndex -ge 0 -and $tunnelArguments[$startupWaitIndex+1] -ceq '30s') 'MCP startup wait must remain unchanged'
 $script:LifecycleDirectory=Join-Path ([IO.Path]::GetTempPath()) ('p11-2-'+[guid]::NewGuid().ToString('N'))
 $script:LifecycleFile=Join-Path $LifecycleDirectory 'owner.bin'
 Initialize-LifecycleDirectory
